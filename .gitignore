@@ -1,0 +1,30 @@
+# CMake build directories
+cmake-build-*/
+build/
+out/
+
+# CMake cache and files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+compile_commands.json
+
+# C/C++ compilation artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# IDE - CLion/IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+
+# OS specific
+.DS_Store
+Thumbs.db
