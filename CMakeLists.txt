@@ -7,7 +7,7 @@ set(CMAKE_C_STANDARD 11)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/zym_core
                  ${CMAKE_CURRENT_BINARY_DIR}/zym_core)
 
-add_executable(zym_js main.c)
+add_executable(zym_js src/main.c)
 target_link_libraries(zym_js PRIVATE zym_core)
 
 # Size optimization: use MinSizeRel for the smallest possible binary
