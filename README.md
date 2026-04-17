@@ -3,17 +3,19 @@
   <p align="center"><strong>Zym in JavaScript. No ceremony.</strong></p>
   <p align="center"><em>WebAssembly bindings for the <a href="https://github.com/zym-lang">Zym</a> scripting language.</em></p>
   <p align="center">
-    Drop a safe, fast scripting sandbox into any JavaScript project — Node, browser, Web Worker, bundler, or a single HTML file.
+    Drop a safe, fast scripting sandbox into any JavaScript project. Works in Node, the browser, Web Workers, bundlers, or a single HTML file.
   </p>
 </p>
 
 ---
 
-> **⚠️ Alpha — `0.3.0-alpha.1`.** This is an early alpha. The API, behavior, and bytecode format are **not stable** and may change without notice between alphas. Do not use in production. This repo tracks a Zym `zym_core` that is *ahead* of the public `0.2.0` release — the language surface here already includes features not yet documented on [zym-lang.org](https://zym-lang.org) (most notably the unified variadic-fallback native signature syntax). Expect sharp edges through the alpha/beta cycle; stability lands with the final `0.3.0` release.
+> **⚠️ Alpha, `0.3.0-alpha.1`.** API, behavior, and bytecode format are not stable yet and may change between alphas. Do not use in production.
+>
+> The vendored `zym_core` here is ahead of the public `0.2.0` release. Features like the unified variadic-fallback native signature aren't yet on [zym-lang.org](https://zym-lang.org). Stability lands with the final `0.3.0` release.
 
 ---
 
-If you've used Zym from C, this is the same VM, same bytecode, same semantics — just reachable from `import`.
+If you've used Zym from C, this is the same VM, same bytecode, same semantics, just reachable from `import`.
 
 ```js
 import Zym from "@zym-lang/zym-js";
@@ -59,11 +61,13 @@ console.log(result.toJS());        // 12.566...
 
 ## Why zym-js?
 
+- **Zym is a small, embeddable scripting language.** Its own language, its own VM, its own bytecode. Designed for embedding into host applications and giving them a controllable scripting surface.
+- **JS-like syntax, so you don't context-switch.** The grammar reads like JavaScript. Flipping between host code and script doesn't re-train your fingers, and the semantics stay the VM's (not JS's), so no surprise coercions bleed into your host.
 - **One import, one call.** `await Zym.newVM()` and you're running scripts. The wasm is loaded lazily and cached; there is no build step at install time.
 - **Runs everywhere modern JS runs.** Node 16+, every evergreen browser, Web Workers, Vite, Next.js, Rollup, Webpack 5. No Node-only APIs, no `SharedArrayBuffer` required.
-- **JS-native natives.** Register any JS function as a Zym native — including closures that capture outer JS state. Variadic and exact-arity both supported under one signature grammar.
+- **JS-native natives.** Register any JS function as a Zym native, including closures that capture outer JS state. Variadic and exact-arity both supported under one signature grammar.
 - **GC just works.** The bridge manages rooting, handle lifetimes, and finalizers. JS devs do not push/pop roots or release values. Forget a value and the JS GC cleans it up.
-- **Natural values.** `zymValue.toJS()` returns real JS — numbers, strings, booleans, `null`, arrays for lists, plain objects for maps, tagged objects for structs, frozen `{__enum, name, ordinal}` for enum variants.
+- **Natural values.** `zymValue.toJS()` returns real JS: numbers, strings, booleans, `null`, arrays for lists, plain objects for maps, tagged objects for structs, frozen `{__enum, name, ordinal}` for enum variants.
 - **Bytecode in, bytecode out.** Compile once, ship a `Uint8Array`, load it anywhere. Same bytecode as native Zym.
 - **Sandboxed.** A JavaScript environment without a general-purpose scripting sandbox is a problem Zym is well-suited to solve. The VM cannot see anything you do not hand it.
 - **TypeScript.** First-class `.d.ts` ships in the package.
@@ -76,9 +80,9 @@ npm install @zym-lang/zym-js
 
 The package ships:
 
-- `js/zym.mjs` — ESM entry (default export `Zym`, named `createZym`, `ZymValue`, `ZymError`)
-- `js/zym.d.ts` — TypeScript defs
-- `dist/zym_js.mjs` + `dist/zym_js.wasm` — Emscripten glue + wasm binary
+- `js/zym.mjs`: ESM entry (default export `Zym`, named `createZym`, `ZymValue`, `ZymError`)
+- `js/zym.d.ts`: TypeScript defs
+- `dist/zym_js.mjs` + `dist/zym_js.wasm`: Emscripten glue + wasm binary
 
 No native compilation is triggered on install.
 
@@ -131,7 +135,7 @@ const vm  = zym.newVM();
 | `vm.registerNative(sig, fn)` | Register a JS function as a Zym native. |
 | `vm.call(name, ...args)` | Call a Zym script function from JS. |
 | `vm.on("error", cb)` | Stream VM errors (compile and runtime) to a listener. |
-| `vm.free()` | Explicitly release VM memory. Optional — a `FinalizationRegistry` will clean up forgotten VMs. |
+| `vm.free()` | Explicitly release VM memory. Optional; a `FinalizationRegistry` will clean up forgotten VMs. |
 
 Full details, signature grammar, marshaling rules, memory semantics, error handling, and recipes are in **[doc.md](./doc.md)**.
 
@@ -163,7 +167,7 @@ JS ↔ Zym marshaling is automatic in both directions:
 | `Function` | becomes a callable Zym value via the native trampoline |
 | `ZymValue` | passthrough (no conversion) |
 
-Coming back out, `ZymValue.toJS()` produces the natural JS shape for every Zym kind (lists → arrays, maps → objects, structs → objects with a `__type` tag, enum variants → `{__enum, name, ordinal}`, primitives → primitives). Cycles are preserved. `ZymValue.display()` is available when you want the VM's canonical printed form (what `print` would show).
+Coming back out, `ZymValue.toJS()` produces the natural JS shape for every Zym kind (lists become arrays, maps become objects, structs become objects with a `__type` tag, enum variants become `{__enum, name, ordinal}`, primitives stay primitive). Cycles are preserved. `ZymValue.display()` is available when you want the VM's canonical printed form (what `print` would show).
 
 ## Running the tests
 
@@ -171,10 +175,10 @@ Coming back out, `ZymValue.toJS()` produces the natural JS shape for every Zym k
 # Build the wasm (needs Emscripten on PATH: `source /path/to/emsdk_env.sh`)
 npm run build
 
-# Smoke test — JS API surface
+# Smoke test: JS API surface
 npm run test:smoke
 
-# Regression suite — every core_tests/*.zym run through the bridge
+# Regression suite: every core_tests/*.zym run through the bridge
 npm run test:regressions
 
 # Both
@@ -194,9 +198,9 @@ Outputs `dist/zym_js.{mjs,wasm}`. The CMake profile is also registered in CLion 
 
 ## Documentation
 
-- **[doc.md](./doc.md)** — the full zym-js API reference (entry points, `VM` class, native registration, values, errors, memory, recipes, FAQ).
-- **[zym-lang.org](https://zym-lang.org)** — the language guide and core library docs. Note the public site currently tracks `0.2.0`; features in this repo that landed post-`0.2.0` (e.g. the variadic-fallback signature syntax) are documented here in-repo until the site catches up.
-- **[Playground](https://zym-lang.org/playground.html)** — try Zym in the browser.
+- **[doc.md](./doc.md)**: the full zym-js API reference (entry points, `VM` class, native registration, values, errors, memory, recipes, FAQ).
+- **[zym-lang.org](https://zym-lang.org)**: the language guide and core library docs. Note the public site currently tracks `0.2.0`; features in this repo that landed post-`0.2.0` (e.g. the variadic-fallback signature syntax) are documented here in-repo until the site catches up.
+- **[Playground](https://zym-lang.org/playground.html)**: try Zym in the browser.
 
 ## Project structure
 
@@ -224,4 +228,4 @@ zym-js/
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

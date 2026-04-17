@@ -1,14 +1,12 @@
 # zym-js
 
-JavaScript / WebAssembly bindings for the [Zym](https://github.com/zym-lang) scripting language. Load the wasm once, spin up one or more VMs, compile & run scripts, register JS functions as Zym natives, define globals, save/load bytecode, and call script functions from JS — all from a single ESM module that runs in Node, the browser, and Web Workers.
+JavaScript / WebAssembly bindings for the [Zym](https://github.com/zym-lang) scripting language. Load the wasm once, spin up one or more VMs, compile and run scripts, register JS functions as Zym natives, define globals, save/load bytecode, and call script functions from JS, all from a single ESM module that runs in Node, the browser, and Web Workers.
 
 ---
 
-> **⚠️ Alpha software — `0.3.0-alpha.1`.**
+> **⚠️ Alpha software, `0.3.0-alpha.1`.** The JS API, native-signature grammar, value marshaling, and bytecode format are not stable and may change between alphas. Do not use in production. Don't persist bytecode produced by this version and expect it to load on later builds.
 >
-> This is an **early alpha**. The JS API, native-signature grammar, value marshaling behavior, and bytecode format are **not stable** and may change without notice between alpha releases. Do **not** use this in production, and do **not** persist bytecode produced by this version expecting it to load on later builds.
->
-> This repo also tracks a `zym_core` that is ahead of the public `0.2.0` release — some language surface described here (notably the unified variadic-fallback native signature syntax) is not yet documented on [zym-lang.org](https://zym-lang.org). Stability lands with the final `0.3.0` release.
+> The vendored `zym_core` here is ahead of the public `0.2.0` release. Some language surface described in this doc (notably the unified variadic-fallback native signature syntax) isn't yet on [zym-lang.org](https://zym-lang.org). Stability lands with the final `0.3.0` release.
 
 ---
 
@@ -126,7 +124,7 @@ Use this when you need an **isolated wasm instance** (e.g., two concurrent VMs w
 
 ## The `VM` class
 
-Every method throws `ZymError` on compile/runtime failure. The `vm` object is opaque — treat it as a handle.
+Every method throws `ZymError` on compile/runtime failure. The `vm` object is opaque; treat it as a handle.
 
 ### `vm.run(source, options?)`
 
@@ -137,8 +135,8 @@ vm.run(`print("hello");`);
 vm.run(source, { file: "user-script.zym", includeLineInfo: true });
 ```
 
-- `options.file` — filename shown in errors (default `"<script>"`).
-- `options.includeLineInfo` — keep line debug info in the compiled chunk (default `true`).
+- `options.file`: filename shown in errors (default `"<script>"`).
+- `options.includeLineInfo`: keep line debug info in the compiled chunk (default `true`).
 
 ### `vm.compile(source, options?)` / `chunk.run()`
 
@@ -198,7 +196,7 @@ off();    // unsubscribe
 
 ### `vm.free()`
 
-Release the VM and everything it owns. Safe to call multiple times. Recommended — a `FinalizationRegistry` will eventually clean up if you forget, but the JS GC makes no timing promises.
+Release the VM and everything it owns. Safe to call multiple times. Recommended: a `FinalizationRegistry` will eventually clean up if you forget, but the JS GC makes no timing promises.
 
 ---
 
@@ -251,7 +249,7 @@ vm.registerNative("sum(...xs)", (...xs) => {
 });
 ```
 
-The rest parameters appear as a JS spread of `ZymValue` wrappers — exactly like a normal JS variadic function.
+The rest parameters appear as a JS spread of `ZymValue` wrappers, exactly like a normal JS variadic function.
 
 ### Closures (capturing JS state)
 
@@ -294,10 +292,10 @@ Every value arriving from Zym (native args, script return values) is wrapped. Th
 | `isNull()` / `isBool()` / `isNumber()` / `isString()` / `isList()` / `isMap()` / `isCallable()` | Convenience type-checks |
 | `toJS()` | Decode into a natural JS value (see next section) |
 | `display()` | VM-formatted string (same output as a Zym `print`) |
-| `toString()` | Alias of `display()` — safe to use in template literals |
+| `toString()` | Alias of `display()`; safe to use in template literals |
 | `dispose()` | Release the underlying handle eagerly (optional) |
 
-You can also pass a `ZymValue` back to any API that accepts marshaled input (`defineGlobal`, `call`, native return value) — it's forwarded without copying.
+You can also pass a `ZymValue` back to any API that accepts marshaled input (`defineGlobal`, `call`, native return value); it's forwarded without copying.
 
 ### `toJS()` decoding rules
 
@@ -313,15 +311,15 @@ You can also pass a `ZymValue` back to any API that accepts marshaled input (`de
 | `map` | plain `Object` (values decoded recursively) |
 | `struct` | plain `Object` with a non-enumerable `__type` string (declared type name) |
 | `enum variant` | frozen `{ __enum, name, ordinal }` |
-| `function` / `closure` / continuation | the `ZymValue` wrapper unchanged (Pass 2 — callable wrappers — is planned) |
+| `function` / `closure` / continuation | the `ZymValue` wrapper unchanged (Pass 2, callable wrappers, is planned) |
 | anything else | the `ZymValue` wrapper unchanged |
 
 Cycles in maps/structs are preserved via shared references (no infinite recursion).
 
 ### `display()` vs `toJS()`
 
-- `toJS()` — "give me the JS form I can program against." Use this in `print` natives, logging, assertions, anywhere you'd normally touch a JS value.
-- `display()` — "give me the VM's canonical text form," identical to what a Zym script would print. Useful for format-aware `print` implementations that want to match core parity.
+- `toJS()`: "give me the JS form I can program against." Use this in `print` natives, logging, assertions, anywhere you'd normally touch a JS value.
+- `display()`: "give me the VM's canonical text form," identical to what a Zym script would print. Useful for format-aware `print` implementations that want to match core parity.
 
 Both are safe on every kind. Prefer `toJS()` unless you specifically need VM formatting.
 
@@ -338,7 +336,7 @@ When you hand a JS value to `defineGlobal`, `vm.call`, or a native's return valu
 | `Array` | `list` (elements marshaled recursively) |
 | plain `Object` | `map` (values marshaled recursively) |
 | `ZymValue` | passed through unchanged |
-| other (functions, class instances, etc.) | rejected — register functions as natives instead |
+| other (functions, class instances, etc.) | rejected; register functions as natives instead |
 
 ---
 
@@ -362,8 +360,8 @@ try {
 }
 ```
 
-- `e.status` — status code; compare against the `STATUS` named export.
-- `e.details` — one entry per diagnostic emitted by the VM. Compile failures often yield multiple.
+- `e.status`: status code; compare against the `STATUS` named export.
+- `e.details`: one entry per diagnostic emitted by the VM. Compile failures often yield multiple.
 - The same diagnostics also stream through `vm.on("error", ...)` if you subscribe.
 
 ---
@@ -373,7 +371,7 @@ try {
 You should not need to think about memory at all in typical use. Here's what the bridge does for you:
 
 - **`ZymValue` wrappers** are tied to a `FinalizationRegistry`; when JS collects the wrapper, the underlying Zym handle is released.
-- **Native arguments** are scoped to the call — they're released automatically when the native returns, unless you kept a JS reference alive (in which case they survive for the wrapper's lifetime).
+- **Native arguments** are scoped to the call. They're released automatically when the native returns, unless you kept a JS reference alive (in which case they survive for the wrapper's lifetime).
 - **JS callbacks you register as natives** live in an id-keyed registry. The Zym GC decides when a native closure is unreachable and notifies the bridge to drop the entry.
 - **Globals and script functions** are rooted by the VM itself.
 
@@ -410,7 +408,7 @@ const { default: Zym } = await import("@zym-lang/zym-js");
 
 ### Browser (bundler)
 
-Vite, Next.js, Rollup, Webpack 5, esbuild — all handle ESM + wasm natively. Nothing special required.
+Vite, Next.js, Rollup, Webpack 5, esbuild all handle ESM + wasm natively. Nothing special required.
 
 ```js
 import Zym from "@zym-lang/zym-js";
@@ -517,10 +515,10 @@ No, but you should. `FinalizationRegistry` will release a forgotten VM eventuall
 Yes. `Zym.newVM()` can be called as many times as you like; each returns an independent VM sharing the same wasm module. If you need independent *wasm heaps*, use `createZym()` twice instead.
 
 **Q: Can I call `vm.run` from inside a native?**
-Yes — the bridge is re-entrant. Handles stay properly rooted across nested calls.
+Yes. The bridge is re-entrant; handles stay properly rooted across nested calls.
 
-**Q: `JSON.stringify(someZymValue)` hangs / crashes — why?**
-Don't stringify a wrapper directly; it carries a back-reference to the wasm `Module`, whose HEAP TypedArrays are huge. Call `.toJS()` first, then `JSON.stringify` the decoded value. `String(wrapper)` and template literals are fine — they route through `display()`.
+**Q: `JSON.stringify(someZymValue)` hangs / crashes. Why?**
+Don't stringify a wrapper directly; it carries a back-reference to the wasm `Module`, whose HEAP TypedArrays are huge. Call `.toJS()` first, then `JSON.stringify` the decoded value. `String(wrapper)` and template literals are fine; they route through `display()`.
 
 **Q: A native returns `undefined`. What does Zym see?**
 `null`. Any missing return is normalized.
@@ -529,7 +527,7 @@ Don't stringify a wrapper directly; it carries a back-reference to the wasm `Mod
 Not directly in Pass 1. Returning a JS function from a native isn't auto-wrapped into a Zym closure yet. Register it as a native up front via `registerNative` and expose it by name.
 
 **Q: How do I hook `print`?**
-Zym ships no default print — every embedder wires its own. The simplest version:
+Zym ships no default print; every embedder wires its own. The simplest version:
 
 ```js
 vm.registerNative("print(...parts)", (...parts) => {
@@ -541,7 +539,7 @@ vm.registerNative("print(...parts)", (...parts) => {
 For format-spec parity with the native `print.c`, see `test/run-core-tests.mjs` for a reference implementation.
 
 **Q: What happens if I register two natives with the same name and same arity?**
-The second registration replaces the first (same as the core C API). Overloading by arity (`foo(a)` and `foo(a, b)`) is supported — Zym dispatches on arity.
+The second registration replaces the first (same as the core C API). Overloading by arity (`foo(a)` and `foo(a, b)`) is supported; Zym dispatches on arity.
 
 **Q: Is async / preemption supported?**
 Not in this release. Scripts run synchronously. Cooperative async via `zym_setPreemptCallback` is planned but gated on the core-side preemption model landing first.
