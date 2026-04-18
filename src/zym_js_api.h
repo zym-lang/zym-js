@@ -172,6 +172,16 @@ int zjs_callFunction(ZymVM* vm, const char* func_name,
                      uint32_t* out_result);
 
 // -----------------------------------------------------------------------------
+// Native error propagation
+// -----------------------------------------------------------------------------
+// When a JS-registered native throws, the JS dispatch trampoline calls this
+// to stash the error message on the per-VM state. The next C trampoline will
+// observe the `is_error` out-param, raise a Zym runtime error using this
+// message, and abort the current script execution (which surfaces as a
+// thrown ZymError out of vm.run / vm.call on the JS side).
+void zjs_setDispatchError(ZymVM* vm, const char* message);
+
+// -----------------------------------------------------------------------------
 // Build info
 // -----------------------------------------------------------------------------
 const char* zjs_version(void);

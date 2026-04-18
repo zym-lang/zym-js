@@ -38,6 +38,11 @@ typedef struct ZjsVMState {
     ZymVM*   vm;
     ZymValue handles_map;   /* ObjMap anchored via globals. */
     uint32_t next_handle;   /* Monotonic id generator; id 0 is reserved. */
+    /* Scratch buffer used by zjs_setDispatchError() to stash a thrown JS
+     * native's message so the C trampoline can raise a real Zym runtime
+     * error with a useful message. 512 bytes is plenty for one-line errors
+     * and we truncate cleanly if a longer message is supplied. */
+    char     last_dispatch_error[512];
 } ZjsVMState;
 
 static ZjsVMState* g_vms[ZJS_MAX_VMS];
@@ -168,6 +173,14 @@ static ZymValue zjs_dispatch(ZymVM* vm, ZymValue ctx, int arity,
 
     if (is_error) {
         if (result_h) zjs_release(s, result_h);
+        /* Raise a real Zym runtime error so the VM aborts and the caller
+         * of vm.run / vm.call sees the thrown JS native's message instead
+         * of silently continuing with a sentinel value. */
+        const char* msg = s->last_dispatch_error[0]
+            ? s->last_dispatch_error
+            : "JS native threw an unspecified error";
+        zym_runtimeError(vm, "%s", msg);
+        s->last_dispatch_error[0] = '\0';
         return ZYM_ERROR;
     }
 
@@ -745,6 +758,21 @@ int zjs_callFunction(ZymVM* vm, const char* func_name, int argc,
         *out_result = zjs_alloc_handle(s, r);
     }
     return ZJS_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Native error propagation                                                   */
+/* -------------------------------------------------------------------------- */
+
+void zjs_setDispatchError(ZymVM* vm, const char* message) {
+    ZjsVMState* s = zjs_find_state(vm);
+    if (!s) return;
+    if (!message) message = "";
+    size_t cap = sizeof(s->last_dispatch_error);
+    size_t n = strlen(message);
+    if (n >= cap) n = cap - 1;
+    memcpy(s->last_dispatch_error, message, n);
+    s->last_dispatch_error[n] = '\0';
 }
 
 /* -------------------------------------------------------------------------- */

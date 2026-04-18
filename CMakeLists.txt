@@ -3,6 +3,9 @@ project(zym_js C)
 
 set(CMAKE_C_STANDARD 11)
 
+#set(CMAKE_BUILD_TYPE MinSizeRel)
+#set(CMAKE_BUILD_TYPE Release)
+
 # Pull in zym_core (lives in this repo as a subdirectory)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/zym_core
                  ${CMAKE_CURRENT_BINARY_DIR}/zym_core)
@@ -25,7 +28,14 @@ target_include_directories(zym_js PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 if(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
     target_compile_options(zym_js   PRIVATE -Oz -flto -fno-asynchronous-unwind-tables -fno-unwind-tables)
     target_compile_options(zym_core PRIVATE -Oz -flto -fno-asynchronous-unwind-tables -fno-unwind-tables)
-    set(WASM_OPT_FLAGS "-Oz -flto --closure 1")
+    set(WASM_OPT_FLAGS "-Oz -flto")
+    # Closure Compiler (--closure 1) further shrinks the JS glue but requires
+    # the `closure-compiler` binary on PATH. Opt-in via -DZYM_JS_CLOSURE=ON so
+    # builds don't fail for users who don't have it installed.
+    option(ZYM_JS_CLOSURE "Run Google Closure Compiler on the JS glue (requires `closure-compiler` on PATH)" OFF)
+    if(ZYM_JS_CLOSURE)
+        set(WASM_OPT_FLAGS "${WASM_OPT_FLAGS} --closure 1")
+    endif()
 else()
     set(WASM_OPT_FLAGS "-O3 -flto")
 endif()
@@ -84,6 +94,7 @@ set(ZJS_EXPORTED_FUNCS
     "_zjs_registerNative"
     "_zjs_registerNativeVariadic"
     "_zjs_callFunction"
+    "_zjs_setDispatchError"
     "_zjs_version"
 )
 string(REPLACE ";" "," ZJS_EXPORTED_FUNCS_CSV "${ZJS_EXPORTED_FUNCS}")
@@ -125,6 +136,8 @@ set_target_properties(zym_js PROPERTIES
         -s ALLOW_TABLE_GROWTH=0 \
         -s DYNAMIC_EXECUTION=0 \
         -s INVOKE_RUN=0 \
+        -s FILESYSTEM=0 \
+        -s ASSERTIONS=0 \
         ${WASM_OPT_FLAGS} \
     "
 )

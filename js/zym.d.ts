@@ -24,6 +24,10 @@ export class ZymError extends Error {
  * Opaque wrapper around a Zym value. Returned by native callbacks as their
  * arguments, and by operations that leave the value type unknown (structs,
  * enums, closures). Use `.toJS()` to decode, or `.kind` to inspect the type.
+ *
+ * Lifetime: accessing a `ZymValue` after its owning `VM` has been freed
+ * (explicitly or via GC) throws a `ZymError` (`"ZymValue used after its VM
+ * was freed"`) rather than reading freed wasm memory.
  */
 export class ZymValue {
     readonly handle: number;
@@ -51,8 +55,15 @@ export class ZymValue {
     /** Format using the VM's display rules (same output as a Zym `print`). */
     display():    string;
     toString():   string;
+    /**
+     * JSON representation; auto-invoked by `JSON.stringify`. Returns the
+     * same plain JS value as `toJS()`, so stringifying a ZymValue is safe.
+     */
+    toJSON():     unknown;
     /** Release the underlying handle eagerly. Optional; GC handles it otherwise. */
     dispose():    void;
+    /** `using`-syntax support (Node 20.11+ / modern browsers). */
+    [Symbol.dispose]?(): void;
 }
 
 /**
@@ -64,7 +75,15 @@ export type Marshalable =
     | { [k: string]: Marshalable }
     | ZymValue;
 
-/** A JS function callable from Zym. Receives wrapped args; may return anything marshalable. */
+/**
+ * A JS function callable from Zym. Receives wrapped args; may return
+ * anything marshalable.
+ *
+ * If the function throws, the exception is converted to a Zym runtime
+ * error with the thrown value's message. The script aborts and the
+ * enclosing `vm.run()` / `vm.call()` rethrows it as a `ZymError` whose
+ * `.details` carries the original JS message (source file `"<js>"`).
+ */
 export type NativeFn = (...args: ZymValue[]) => Marshalable;
 
 export interface CompileOptions {
@@ -79,12 +98,25 @@ export interface SerializeOptions {
 /** Opaque compiled program. Save with `vm.serialize(chunk)`. */
 export class Chunk {
     run(): void;
+    /** Free the chunk's memory. Optional; GC handles it otherwise. */
     free(): void;
+    /** `using`-syntax support (Node 20.11+ / modern browsers). */
+    [Symbol.dispose]?(): void;
+    /** Safe JSON form; auto-invoked by `JSON.stringify`. */
+    toJSON(): { type: "ZymChunk"; alive: boolean };
 }
 
 export interface VM {
-    /** Destroy the VM and everything it owns. Safe to call multiple times. */
+    /**
+     * Destroy the VM and everything it owns. Safe to call multiple times.
+     * If forgotten, the JS GC eventually reclaims the VM via a
+     * FinalizationRegistry; call explicitly for deterministic cleanup.
+     */
     free(): void;
+    /** `using`-syntax support (Node 20.11+ / modern browsers). */
+    [Symbol.dispose]?(): void;
+    /** Safe JSON form; auto-invoked by `JSON.stringify`. */
+    toJSON(): { type: "ZymVM"; alive: boolean };
 
     /** Subscribe to compile/runtime errors. Returns an unsubscribe function. */
     on(event: "error", listener: (err: ZymErrorDetail) => void): () => void;

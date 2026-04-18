@@ -1149,6 +1149,7 @@ var _zjs_registerNative = Module['_zjs_registerNative'] = (a0, a1, a2) => (_zjs_
 var _zjs_registerNativeVariadic = Module['_zjs_registerNativeVariadic'] = (a0, a1, a2) => (_zjs_registerNativeVariadic = Module['_zjs_registerNativeVariadic'] = wasmExports['zjs_registerNativeVariadic'])(a0, a1, a2);
 var _zjs_callFunction = Module['_zjs_callFunction'] = (a0, a1, a2, a3, a4) => (_zjs_callFunction = Module['_zjs_callFunction'] = wasmExports['zjs_callFunction'])(a0, a1, a2, a3, a4);
 var _malloc = Module['_malloc'] = (a0) => (_malloc = Module['_malloc'] = wasmExports['malloc'])(a0);
+var _zjs_setDispatchError = Module['_zjs_setDispatchError'] = (a0, a1) => (_zjs_setDispatchError = Module['_zjs_setDispatchError'] = wasmExports['zjs_setDispatchError'])(a0, a1);
 var _zjs_version = Module['_zjs_version'] = () => (_zjs_version = Module['_zjs_version'] = wasmExports['zjs_version'])();
 var __emscripten_tempret_set = (a0) => (__emscripten_tempret_set = wasmExports['_emscripten_tempret_set'])(a0);
 var __emscripten_tempret_get = () => (__emscripten_tempret_get = wasmExports['_emscripten_tempret_get'])();

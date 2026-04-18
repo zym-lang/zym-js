@@ -56,6 +56,33 @@ export class ZymError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Module-level finalizer for VM wrappers. If a user forgets to call
+// `vm.free()` and drops all references, the JS GC eventually reclaims the
+// wrapper and this finalizer runs, releasing the wasm VM, its callbacks,
+// and its error-bus entries. The held value is intentionally a closure that
+// captures ONLY primitives / non-wrapper references so the registry does
+// not pin the wrapper object.
+// ---------------------------------------------------------------------------
+const _vmFinalizer = new FinalizationRegistry((cleanup) => {
+    try { cleanup(); } catch (_) { /* swallow; finalizers must not throw */ }
+});
+
+// Finalizer for Chunk wrappers: frees the compiled chunk if the wrapper is
+// dropped without `chunk.free()` (and the parent VM is still alive).
+const _chunkFinalizer = new FinalizationRegistry((cleanup) => {
+    try { cleanup(); } catch (_) { /* swallow */ }
+});
+
+// Define an own property that is not enumerable -- keeps wrapper internals
+// out of JSON.stringify, structuredClone, and generic property walks (which
+// would otherwise traverse `_vm -> Module -> HEAP*` and blow up).
+function _hide(target, key, value) {
+    Object.defineProperty(target, key, {
+        value, writable: true, enumerable: false, configurable: true,
+    });
+}
+
+// ---------------------------------------------------------------------------
 // `createZym()` -- loads the wasm module and returns a small factory object.
 // The underlying Emscripten module is created once per call; if you need
 // strict isolation (e.g. separate wasm memories) call it again. Most users
@@ -176,6 +203,19 @@ class Bridge {
                 // get a meaningful message.
                 Module.HEAP32[outIsErrorPtr >> 2] = 1;
                 const msg = err && err.message ? String(err.message) : String(err);
+                // Stash the message on the C side so the trampoline can
+                // raise an actual `zym_runtimeError` with this text when
+                // it sees is_error=1. Without this, the VM would swallow
+                // the exception as a sentinel and keep executing.
+                try {
+                    const len = Module.lengthBytesUTF8(msg) + 1;
+                    const buf = Module._malloc(len);
+                    if (buf) {
+                        Module.stringToUTF8(msg, buf, len);
+                        Module._zjs_setDispatchError(vmPtr, buf);
+                        Module._free(buf);
+                    }
+                } catch (_) { /* best-effort; falls back to generic text on the C side */ }
                 const pushed = { status: STATUS.RUNTIME_ERROR, file: "<js>", line: -1, message: msg };
                 const listeners = this.errorListeners.get(vmPtr);
                 if (listeners) for (const l of listeners) { try { l(pushed); } catch (_) {} }
@@ -208,15 +248,19 @@ function readHandleArray(Module, ptr, count) {
 // ---------------------------------------------------------------------------
 class ZymValue {
     constructor(vm, handle, owned) {
-        this._vm = vm;
-        this._h = handle;
-        this._owned = owned;
+        // Internals are non-enumerable so `JSON.stringify(zymValue)` does not
+        // walk into `_vm -> Module -> HEAP*` and hang/OOM. User code that
+        // wants a serializable shape should call `.toJSON()` (auto-invoked
+        // by JSON.stringify) or `.toJS()`.
+        _hide(this, "_vm", vm);
+        _hide(this, "_h", handle);
+        _hide(this, "_owned", owned);
         if (owned && handle !== 0) {
             vm._finalizer.register(this, { vm, handle }, this);
         }
     }
     get handle() { return this._h; }
-    get kind()   { return this._vm._kindOf(this._h); }
+    get kind()   { this._assertAlive(); return this._vm._kindOf(this._h); }
     isNull()     { return this.kind === KIND.NULL; }
     isBool()     { return this.kind === KIND.BOOL; }
     isNumber()   { return this.kind === KIND.NUMBER; }
@@ -241,7 +285,7 @@ class ZymValue {
      * second time a handle is seen), so decoding a self-referential Zym map
      * produces a self-referential JS object instead of hanging.
      */
-    toJS()       { return this._vm._decode(this._h, new Map()); }
+    toJS()       { this._assertAlive(); return this._vm._decode(this._h, new Map()); }
     /**
      * Format this value using the VM's own display rules (same output the
      * `print` statement produces). Works for every kind, including enums,
@@ -249,6 +293,7 @@ class ZymValue {
      * wrapper otherwise has no meaningful primitive representation.
      */
     display() {
+        this._assertAlive();
         return this._vm._displayString(this._h);
     }
     /**
@@ -259,13 +304,31 @@ class ZymValue {
      * back-pointer into the Emscripten Module and hang / OOM).
      */
     toString()   { return this.display(); }
+    /**
+     * Safe JSON form: decode to a plain JS value. Called automatically by
+     * `JSON.stringify(zymValue)`.
+     */
+    toJSON()     { return this.toJS(); }
+    /**
+     * Guard: throw a clear ZymError if this wrapper is used after its VM
+     * was freed, instead of reading freed wasm memory and producing
+     * undefined behavior. Handle-id 0 is always legal (it is null).
+     */
+    _assertAlive() {
+        if (this._h === 0) return;
+        if (this._vm && this._vm._freed) {
+            throw new ZymError("ZymValue used after its VM was freed");
+        }
+    }
     /** Release the handle eagerly. Safe to call multiple times. */
     dispose() {
         if (!this._owned || this._h === 0) return;
-        this._vm._releaseHandle(this._h);
-        this._vm._finalizer.unregister(this);
+        try { this._vm._releaseHandle(this._h); } catch (_) {}
+        try { this._vm._finalizer.unregister(this); } catch (_) {}
         this._h = 0;
     }
+    // `Symbol.dispose` handler is attached post-definition, guarded for Node
+    // versions that predate JS explicit-resource-management.
 }
 
 // ---------------------------------------------------------------------------
@@ -273,19 +336,47 @@ class ZymValue {
 // ---------------------------------------------------------------------------
 class VM {
     constructor(bridge) {
-        this._bridge = bridge;
         const M = bridge.M;
-        this._M = M;
-        this._ptr = M._zjs_newVM();
-        if (!this._ptr) throw new ZymError("failed to create VM");
-        // Finalization registry to release handles whose JS wrappers get
-        // garbage-collected without explicit dispose().
-        this._finalizer = new FinalizationRegistry(({ vm, handle }) => {
+        const ptr = M._zjs_newVM();
+        if (!ptr) throw new ZymError("failed to create VM");
+
+        // Non-enumerable internals (see _hide rationale on ZymValue).
+        _hide(this, "_bridge", bridge);
+        _hide(this, "_M", M);
+        _hide(this, "_ptr", ptr);
+        _hide(this, "_freed", false);
+        _hide(this, "_myCallbackIds", new Set());
+
+        // Per-VM handle finalizer: release handles whose ZymValue wrappers
+        // were dropped without explicit dispose().
+        _hide(this, "_finalizer", new FinalizationRegistry(({ vm, handle }) => {
             if (!vm._freed) vm._releaseHandle(handle);
-        });
-        this._freed = false;
-        // Track cb_ids this VM registered so we can purge them on free().
-        this._myCallbackIds = new Set();
+        }));
+
+        // Register this VM with the module-level finalizer so a forgotten
+        // `vm.free()` does not leak the wasm VM. Captures ONLY the bits we
+        // need to clean up so the registry entry does not pin the wrapper.
+        const callbackIds = this._myCallbackIds;
+        const vmCleanup = () => {
+            // Idempotent: if free() already ran, these are harmless no-ops.
+            for (const id of callbackIds) bridge.callbacks.delete(id);
+            callbackIds.clear();
+            bridge.errorListeners.delete(ptr);
+            bridge.pendingErrors.delete(ptr);
+            // Only call into wasm if the VM pointer is still live. `free()`
+            // zeroes the wrapper's _ptr, but `vmCleanup` closes over the
+            // original ptr -- we need a separate "freed" flag that survives
+            // the wrapper going away. A WeakRef-based flag is overkill;
+            // instead, stash a token object that `free()` mutates.
+            if (!token.freed) {
+                token.freed = true;
+                M._zjs_freeVM(ptr);
+            }
+        };
+        const token = { freed: false };
+        _hide(this, "_cleanupToken", token);
+        _hide(this, "_cleanup", vmCleanup);
+        _vmFinalizer.register(this, vmCleanup, this);
     }
 
     // -------------------------------------------------------------------
@@ -294,15 +385,20 @@ class VM {
     free() {
         if (this._freed) return;
         this._freed = true;
-        // Drop callback entries belonging to this VM so we don't leak JS
-        // closures indefinitely.
-        for (const id of this._myCallbackIds) this._bridge.callbacks.delete(id);
-        this._myCallbackIds.clear();
-        this._bridge.errorListeners.delete(this._ptr);
-        this._bridge.pendingErrors.delete(this._ptr);
-        this._M._zjs_freeVM(this._ptr);
+        // Invoke the same cleanup path the finalizer would run. The shared
+        // _cleanupToken ensures the wasm VM is only freed once regardless
+        // of which path (explicit free vs. GC finalizer) runs first.
+        this._cleanup();
+        // Prevent the finalizer from firing again post-GC.
+        try { _vmFinalizer.unregister(this); } catch (_) {}
         this._ptr = 0;
     }
+    /**
+     * Safe JSON form: JSON.stringify(vm) returns a neutral summary instead
+     * of walking internals and hitting wasm heap pointers.
+     */
+    toJSON() { return { type: "ZymVM", alive: !this._freed }; }
+    // `Symbol.dispose` handler attached post-definition for Node <20.11 compat.
 
     // -------------------------------------------------------------------
     // Events
@@ -401,9 +497,7 @@ class VM {
         try {
             const status = M._zjs_deserializeChunk(this._ptr, empty._ptr, bufPtr, arr.length);
             if (status !== STATUS.OK) this._throwFromStatus(status, "deserialize failed");
-            const taken = empty;
-            empty._owned = false;  // transfer ownership to caller
-            return taken;
+            return empty;
         } finally {
             M._free(bufPtr);
         }
@@ -717,9 +811,26 @@ class VM {
 // ---------------------------------------------------------------------------
 class Chunk {
     constructor(vm, ptr) {
-        this._vm = vm;
-        this._ptr = ptr;
-        this._owned = true;
+        _hide(this, "_vm", vm);
+        _hide(this, "_ptr", ptr);
+        _hide(this, "_owned", true);
+
+        // Register with the chunk finalizer so forgotten chunks are freed.
+        // Capture only primitives / the underlying wasm module to avoid
+        // pinning either the VM wrapper or this Chunk wrapper.
+        const M = vm._M;
+        const vmPtr = vm._ptr;
+        const vmToken = vm._cleanupToken;
+        const chunkToken = { freed: false };
+        _hide(this, "_chunkToken", chunkToken);
+        const cleanup = () => {
+            if (chunkToken.freed) return;
+            chunkToken.freed = true;
+            if (vmToken && vmToken.freed) return;   // VM gone, chunk memory already gone
+            try { M._zjs_freeChunk(vmPtr, ptr); } catch (_) {}
+        };
+        _hide(this, "_cleanup", cleanup);
+        _chunkFinalizer.register(this, cleanup, this);
     }
     run() {
         this._vm._checkAlive();
@@ -729,10 +840,21 @@ class Chunk {
     }
     free() {
         if (!this._owned || !this._ptr || this._vm._freed) return;
-        this._vm._M._zjs_freeChunk(this._vm._ptr, this._ptr);
-        this._ptr = 0;
         this._owned = false;
+        this._cleanup();
+        try { _chunkFinalizer.unregister(this); } catch (_) {}
+        this._ptr = 0;
     }
+    toJSON() { return { type: "ZymChunk", alive: this._owned && !!this._ptr }; }
+}
+
+// Attach `using` / `Symbol.dispose` handlers only if the runtime actually
+// has the symbol. On older Node (<20.11) this is a no-op; on modern
+// runtimes the `using vm = await Zym.newVM()` syntax Just Works.
+if (typeof Symbol !== "undefined" && typeof Symbol.dispose === "symbol") {
+    VM.prototype[Symbol.dispose]       = function () { this.free(); };
+    Chunk.prototype[Symbol.dispose]    = function () { this.free(); };
+    ZymValue.prototype[Symbol.dispose] = function () { this.dispose(); };
 }
 
 // ---------------------------------------------------------------------------

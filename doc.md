@@ -377,6 +377,8 @@ You should not need to think about memory at all in typical use. Here's what the
 
 The one place determinism matters is VM teardown: call `vm.free()` when you're done, because finalizers may not fire before process exit. If you forget, the bridge's own teardown walks and releases every outstanding handle.
 
+If you hold on to a `ZymValue` past `vm.free()`, using it (`toJS`, `display`, `kind`, etc.) throws a `ZymError` (`"ZymValue used after its VM was freed"`) instead of reading freed wasm memory.
+
 For advanced users who care about peak memory, `ZymValue.dispose()` releases a handle eagerly.
 
 ---
