@@ -68,6 +68,10 @@ void   zjs_freeVM(ZymVM* vm);
 // -----------------------------------------------------------------------------
 // Release a handle previously returned by this API. Safe to call with id 0.
 void     zjs_releaseHandle(ZymVM* vm, uint32_t handle);
+// Allocate a fresh handle referencing the same value as `handle`. Useful when
+// a JS-side wrapper needs its own lifetime independent of the original
+// handle. Returns 0 on invalid input.
+uint32_t zjs_dupHandle(ZymVM* vm, uint32_t handle);
 // Retrieve the kind of a handle. Returns ZJS_KIND_UNKNOWN on invalid handle.
 uint32_t zjs_valueKind(ZymVM* vm, uint32_t handle);
 
@@ -170,6 +174,13 @@ int zjs_registerNativeVariadic(ZymVM* vm, const char* signature, uint32_t cb_id)
 int zjs_callFunction(ZymVM* vm, const char* func_name,
                      int argc, const uint32_t* argv_handles,
                      uint32_t* out_result);
+
+// Call an arbitrary callable value (function / closure / native closure) held
+// by handle. Marshalling semantics match `zjs_callFunction`. Returns
+// ZJS_BRIDGE_ERROR if the handle is not callable.
+int zjs_callValue(ZymVM* vm, uint32_t callable_handle,
+                  int argc, const uint32_t* argv_handles,
+                  uint32_t* out_result);
 
 // -----------------------------------------------------------------------------
 // Native error propagation

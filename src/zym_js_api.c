@@ -405,6 +405,13 @@ void zjs_releaseHandle(ZymVM* vm, uint32_t handle) {
     if (s) zjs_release(s, handle);
 }
 
+uint32_t zjs_dupHandle(ZymVM* vm, uint32_t handle) {
+    ZjsVMState* s = zjs_find_state(vm);
+    if (!s || handle == 0) return 0;
+    ZymValue v = zjs_get_handle(s, handle);
+    return zjs_alloc_handle(s, v);
+}
+
 uint32_t zjs_valueKind(ZymVM* vm, uint32_t handle) {
     ZjsVMState* s = zjs_find_state(vm);
     if (!s) return ZJS_KIND_UNKNOWN;
@@ -749,6 +756,37 @@ int zjs_callFunction(ZymVM* vm, const char* func_name, int argc,
     for (int i = 0; i < argc; i++) argv[i] = zjs_get_handle(s, argv_handles[i]);
 
     ZymStatus st = zym_callv(vm, func_name, argc, argv);
+    if (argv != argv_stack) free(argv);
+
+    if (st != ZYM_STATUS_OK) return (int)st;
+
+    if (out_result) {
+        ZymValue r = zym_getCallResult(vm);
+        *out_result = zjs_alloc_handle(s, r);
+    }
+    return ZJS_OK;
+}
+
+int zjs_callValue(ZymVM* vm, uint32_t callable_handle, int argc,
+                  const uint32_t* argv_handles, uint32_t* out_result) {
+    if (out_result) *out_result = 0;
+    ZjsVMState* s = zjs_find_state(vm);
+    if (!s) return ZJS_BRIDGE_ERROR;
+
+    ZymValue callable = zjs_get_handle(s, callable_handle);
+    if (!zym_isFunction(callable) && !zym_isClosure(callable)) {
+        return ZJS_BRIDGE_ERROR;
+    }
+
+    ZymValue argv_stack[16];
+    ZymValue* argv = argv_stack;
+    if (argc > 16) {
+        argv = (ZymValue*)malloc(sizeof(ZymValue) * (size_t)argc);
+        if (!argv) return ZJS_BRIDGE_ERROR;
+    }
+    for (int i = 0; i < argc; i++) argv[i] = zjs_get_handle(s, argv_handles[i]);
+
+    ZymStatus st = zym_callClosurev(vm, callable, argc, argv);
     if (argv != argv_stack) free(argv);
 
     if (st != ZYM_STATUS_OK) return (int)st;

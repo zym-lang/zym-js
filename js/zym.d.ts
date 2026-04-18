@@ -48,7 +48,13 @@ export class ZymValue {
      *                                    `__type` string carrying the
      *                                    declared type name
      *   enum variant                  -> { __enum, name, ordinal } (frozen)
-     *   function / closure / other    -> the ZymValue wrapper unchanged
+     *   function / closure            -> a callable JS function; invoking it
+     *                                    calls back into the VM. The callable
+     *                                    owns its own handle and exposes
+     *                                    `.free()` / `[Symbol.dispose]` for
+     *                                    deterministic cleanup (otherwise GC
+     *                                    releases it).
+     *   continuation / unknown        -> the ZymValue wrapper unchanged
      * Cycles in maps/structs are preserved via shared references.
      */
     toJS():       unknown;
@@ -145,6 +151,28 @@ export interface VM {
 
     /** Invoke a Zym script function and return its result. */
     call(funcName: string, ...args: Marshalable[]): unknown;
+
+    /**
+     * Invoke an arbitrary callable value (function / closure) held by a
+     * `ZymValue` wrapper or raw handle. This is the substrate behind the
+     * callable returned from `ZymValue.toJS()`; most code should use the
+     * callable directly and only reach for `callValue` when it already has
+     * an opaque `ZymValue`.
+     */
+    callValue(callable: ZymValue | number, args?: Marshalable[]): unknown;
+}
+
+/**
+ * Callable JS wrapper returned by `toJS()` for a Zym function/closure.
+ * Invoking it calls back into the VM; `free()` / `[Symbol.dispose]` release
+ * the underlying handle eagerly (otherwise GC handles it).
+ */
+export interface ZymCallable {
+    (...args: Marshalable[]): unknown;
+    free(): void;
+    dispose(): void;
+    [Symbol.dispose]?(): void;
+    readonly __zymCallable: true;
 }
 
 export interface ZymFactory {

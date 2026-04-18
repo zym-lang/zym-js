@@ -73,6 +73,13 @@ const _chunkFinalizer = new FinalizationRegistry((cleanup) => {
     try { cleanup(); } catch (_) { /* swallow */ }
 });
 
+// Finalizer for callable JS wrappers produced when `toJS()` decodes a Zym
+// FUNCTION/CLOSURE. When the callable is GC'd, its underlying handle is
+// released so the Zym GC can reclaim the function/closure.
+const _callableFinalizer = new FinalizationRegistry((cleanup) => {
+    try { cleanup(); } catch (_) { /* swallow */ }
+});
+
 // Define an own property that is not enumerable -- keeps wrapper internals
 // out of JSON.stringify, structuredClone, and generic property walks (which
 // would otherwise traverse `_vm -> Module -> HEAP*` and blow up).
@@ -563,11 +570,45 @@ class VM {
         this._checkAlive();
         const M = this._M;
         const namePtr = _strToWasm(M, funcName);
-        const argsArr = new Uint32Array(args.length || 1);
+        try {
+            return this._invoke(args, (argvPtr, resultPtr) =>
+                M._zjs_callFunction(this._ptr, namePtr, args.length, argvPtr, resultPtr),
+                `call(${funcName}) failed`);
+        } finally {
+            M._free(namePtr);
+        }
+    }
+
+    /**
+     * Call an arbitrary callable value (function or closure) held by handle.
+     * Mirrors `call()` but takes a raw handle or a `ZymValue` wrapper instead
+     * of a global name. Primarily used internally to back the JS-callable
+     * wrappers that `toJS()` now returns for Zym functions/closures.
+     */
+    callValue(callable, args = []) {
+        this._checkAlive();
+        const handle = (callable instanceof ZymValue)
+            ? (callable._assertAlive(), callable._h)
+            : (callable | 0);
+        if (!handle) throw new ZymError("callValue: missing callable handle");
+        const M = this._M;
+        return this._invoke(args, (argvPtr, resultPtr) =>
+            M._zjs_callValue(this._ptr, handle, args.length, argvPtr, resultPtr),
+            `callValue failed`);
+    }
+
+    /**
+     * Shared call machinery for `call` / `callValue`. Marshals args, invokes
+     * `op(argvPtr, resultPtr)`, decodes the result, and always releases the
+     * temporary arg handles plus any native bookkeeping.
+     */
+    _invoke(args, op, errLabel) {
+        const M = this._M;
         const argvPtr = args.length > 0 ? M._malloc(4 * args.length) : 0;
         const resultPtr = M._malloc(4);
         const ownedHandles = [];
         try {
+            const argsArr = new Uint32Array(args.length || 1);
             for (let i = 0; i < args.length; i++) {
                 const h = this._marshalToHandle(args[i], "transfer");
                 ownedHandles.push(h);
@@ -577,8 +618,8 @@ class VM {
                 M.HEAPU32.set(argsArr.subarray(0, args.length), argvPtr >> 2);
             }
             this._drainErrors();
-            const status = M._zjs_callFunction(this._ptr, namePtr, args.length, argvPtr, resultPtr);
-            if (status !== STATUS.OK) this._throwFromStatus(status, `call(${funcName}) failed`);
+            const status = op(argvPtr, resultPtr);
+            if (status !== STATUS.OK) this._throwFromStatus(status, errLabel);
             const rh = M.HEAPU32[resultPtr >> 2];
             const result = this._decode(rh);
             if (rh) this._releaseHandle(rh);
@@ -587,7 +628,6 @@ class VM {
             for (const h of ownedHandles) this._releaseHandle(h);
             if (argvPtr) M._free(argvPtr);
             M._free(resultPtr);
-            M._free(namePtr);
         }
     }
 
@@ -768,12 +808,77 @@ class VM {
                     ordinal: M._zjs_enumVariantIndex(this._ptr, handle),
                 });
             }
-            // Callables, continuations, prompt tags and anything unrecognized
-            // are handed back as an opaque wrapper. Pass-2 of this work will
-            // turn functions/closures into callable JS functions.
+            case KIND.FUNCTION:
+            case KIND.CLOSURE:
+                return this._makeCallable(handle);
+            // Continuations, prompt tags, and anything unrecognized are
+            // handed back as an opaque wrapper for advanced use.
             default:
                 return new ZymValue(this, handle, /*owned*/ false);
         }
+    }
+
+    /**
+     * Wrap a Zym FUNCTION/CLOSURE handle as a real JS callable. The returned
+     * function owns its own duplicate of the handle (so it outlives whatever
+     * ephemeral handle `_decode` was handed); a FinalizationRegistry releases
+     * that duplicate when the JS function itself is collected. Users who want
+     * deterministic cleanup can call `.free()` or `using fn = ...`.
+     */
+    _makeCallable(srcHandle) {
+        const vm = this;
+        const M = this._M;
+        // Allocate our own handle so the returned callable's lifetime is
+        // independent of whichever transient handle _decode was given.
+        const dupH = M._zjs_dupHandle(this._ptr, srcHandle);
+        if (!dupH) {
+            // Fall back to the opaque wrapper if dup failed for any reason.
+            return new ZymValue(this, srcHandle, false);
+        }
+
+        // Weak VM reference avoids pinning the VM wrapper via the callable.
+        const vmRef = new WeakRef(vm);
+        const state = { released: false };
+
+        const callable = function (...args) {
+            if (state.released) throw new ZymError("callable has been freed");
+            const liveVm = vmRef.deref();
+            if (!liveVm || liveVm._freed) throw new ZymError("VM has been freed");
+            return liveVm.callValue(dupH, args);
+        };
+
+        // Deterministic release path.
+        const release = () => {
+            if (state.released) return;
+            state.released = true;
+            _callableFinalizer.unregister(state);
+            const liveVm = vmRef.deref();
+            if (liveVm && !liveVm._freed) {
+                try { liveVm._M._zjs_releaseHandle(liveVm._ptr, dupH); }
+                catch (_) { /* swallow */ }
+            }
+        };
+
+        _hide(callable, "free", release);
+        _hide(callable, "dispose", release);
+        if (typeof Symbol !== "undefined" && Symbol.dispose) {
+            _hide(callable, Symbol.dispose, release);
+        }
+        _hide(callable, "__zymCallable", true);
+
+        // Finalizer: if the callable is GC'd without `.free()`, release the
+        // dup handle so the Zym GC can reclaim the underlying function.
+        _callableFinalizer.register(callable, () => {
+            if (state.released) return;
+            state.released = true;
+            const liveVm = vmRef.deref();
+            if (liveVm && !liveVm._freed) {
+                try { liveVm._M._zjs_releaseHandle(liveVm._ptr, dupH); }
+                catch (_) { /* swallow */ }
+            }
+        }, state);
+
+        return callable;
     }
 
     /**

@@ -1110,6 +1110,7 @@ var _zjs_newVM = Module['_zjs_newVM'] = () => (_zjs_newVM = Module['_zjs_newVM']
 var _free = Module['_free'] = (a0) => (_free = Module['_free'] = wasmExports['free'])(a0);
 var _zjs_freeVM = Module['_zjs_freeVM'] = (a0) => (_zjs_freeVM = Module['_zjs_freeVM'] = wasmExports['zjs_freeVM'])(a0);
 var _zjs_releaseHandle = Module['_zjs_releaseHandle'] = (a0, a1) => (_zjs_releaseHandle = Module['_zjs_releaseHandle'] = wasmExports['zjs_releaseHandle'])(a0, a1);
+var _zjs_dupHandle = Module['_zjs_dupHandle'] = (a0, a1) => (_zjs_dupHandle = Module['_zjs_dupHandle'] = wasmExports['zjs_dupHandle'])(a0, a1);
 var _zjs_valueKind = Module['_zjs_valueKind'] = (a0, a1) => (_zjs_valueKind = Module['_zjs_valueKind'] = wasmExports['zjs_valueKind'])(a0, a1);
 var _zjs_newNull = Module['_zjs_newNull'] = (a0) => (_zjs_newNull = Module['_zjs_newNull'] = wasmExports['zjs_newNull'])(a0);
 var _zjs_newBool = Module['_zjs_newBool'] = (a0, a1) => (_zjs_newBool = Module['_zjs_newBool'] = wasmExports['zjs_newBool'])(a0, a1);
@@ -1149,6 +1150,7 @@ var _zjs_registerNative = Module['_zjs_registerNative'] = (a0, a1, a2) => (_zjs_
 var _zjs_registerNativeVariadic = Module['_zjs_registerNativeVariadic'] = (a0, a1, a2) => (_zjs_registerNativeVariadic = Module['_zjs_registerNativeVariadic'] = wasmExports['zjs_registerNativeVariadic'])(a0, a1, a2);
 var _zjs_callFunction = Module['_zjs_callFunction'] = (a0, a1, a2, a3, a4) => (_zjs_callFunction = Module['_zjs_callFunction'] = wasmExports['zjs_callFunction'])(a0, a1, a2, a3, a4);
 var _malloc = Module['_malloc'] = (a0) => (_malloc = Module['_malloc'] = wasmExports['malloc'])(a0);
+var _zjs_callValue = Module['_zjs_callValue'] = (a0, a1, a2, a3, a4) => (_zjs_callValue = Module['_zjs_callValue'] = wasmExports['zjs_callValue'])(a0, a1, a2, a3, a4);
 var _zjs_setDispatchError = Module['_zjs_setDispatchError'] = (a0, a1) => (_zjs_setDispatchError = Module['_zjs_setDispatchError'] = wasmExports['zjs_setDispatchError'])(a0, a1);
 var _zjs_version = Module['_zjs_version'] = () => (_zjs_version = Module['_zjs_version'] = wasmExports['zjs_version'])();
 var __emscripten_tempret_set = (a0) => (__emscripten_tempret_set = wasmExports['_emscripten_tempret_set'])(a0);

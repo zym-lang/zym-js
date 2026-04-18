@@ -182,6 +182,16 @@ vm.run(`fun add(a, b) { return a + b; }`);
 const sum = vm.call("add", 2, 3);   // 5
 ```
 
+### `vm.callValue(callable, args?)`
+
+Invoke an arbitrary callable value (Zym function or closure) held by a `ZymValue` wrapper or raw handle. This is the substrate behind the callable returned by `ZymValue.toJS()` for functions/closures; you rarely need to call it directly.
+
+```js
+vm.run(`func makeAdder(n) { return func(x) { return x + n; }; }`);
+const add10 = vm.call("makeAdder", 10);   // decoded as a JS callable
+add10(5);                                  // 15  (uses callValue under the hood)
+```
+
 ### `vm.on("error", listener)`
 
 Subscribe to compile and runtime errors as a stream. Fires in addition to the thrown `ZymError` (useful for logging multiple diagnostics from a single compile).
@@ -311,10 +321,19 @@ You can also pass a `ZymValue` back to any API that accepts marshaled input (`de
 | `map` | plain `Object` (values decoded recursively) |
 | `struct` | plain `Object` with a non-enumerable `__type` string (declared type name) |
 | `enum variant` | frozen `{ __enum, name, ordinal }` |
-| `function` / `closure` / continuation | the `ZymValue` wrapper unchanged (Pass 2, callable wrappers, is planned) |
-| anything else | the `ZymValue` wrapper unchanged |
+| `function` / `closure` | a callable JS function; invoking it calls back into the VM. Exposes `.free()` / `[Symbol.dispose]` for deterministic cleanup (otherwise GC releases it). |
+| `continuation` / anything else | the `ZymValue` wrapper unchanged |
 
 Cycles in maps/structs are preserved via shared references (no infinite recursion).
+
+Callables returned from `toJS()` own their own handle, so they stay valid after the original `ZymValue` or result handle is gone. They are invoked with plain JS args which are auto-marshaled; the return value is decoded with the same rules as the rest of the table.
+
+```js
+vm.run(`fun make() { return (x) => x * x; }`);
+const sq = vm.call("make");          // sq is a JS function
+sq(7);                                 // 49
+sq.free();                             // optional; GC also handles it
+```
 
 ### `display()` vs `toJS()`
 

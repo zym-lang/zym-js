@@ -56,6 +56,7 @@ set(ZJS_EXPORTED_FUNCS
     "_zjs_newVM"
     "_zjs_freeVM"
     "_zjs_releaseHandle"
+    "_zjs_dupHandle"
     "_zjs_valueKind"
     "_zjs_newNull"
     "_zjs_newBool"
@@ -94,6 +95,7 @@ set(ZJS_EXPORTED_FUNCS
     "_zjs_registerNative"
     "_zjs_registerNativeVariadic"
     "_zjs_callFunction"
+    "_zjs_callValue"
     "_zjs_setDispatchError"
     "_zjs_version"
 )
