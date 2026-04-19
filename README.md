@@ -9,7 +9,7 @@
 
 ---
 
-> **⚠️ Alpha, `0.3.0-alpha.1`.** API, behavior, and bytecode format are not stable yet and may change between alphas. Do not use in production.
+> **⚠️ Alpha, `0.3.0-alpha.2`.** API, behavior, and bytecode format are not stable yet and may change between alphas. Do not use in production.
 >
 > The vendored `zym_core` here is ahead of the public `0.2.0` release. Features like the unified variadic-fallback native signature aren't yet on [zym-lang.org](https://zym-lang.org). Stability lands with the final `0.3.0` release.
 

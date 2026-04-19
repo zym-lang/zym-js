@@ -1,6 +1,6 @@
 {
   "name": "@zym-lang/zym-js",
-  "version": "0.3.0-alpha.1",
+  "version": "0.3.0-alpha.2",
   "description": "JavaScript / WebAssembly bindings for the Zym scripting language. Embed a Zym VM in Node, the browser, or a Web Worker — compile and run scripts, register JS functions as Zym natives, define globals, save/load bytecode, and call script functions from JS.",
   "type": "module",
   "main": "./js/zym.mjs",
