@@ -193,8 +193,67 @@ int zjs_callValue(ZymVM* vm, uint32_t callable_handle,
 void zjs_setDispatchError(ZymVM* vm, const char* message);
 
 // -----------------------------------------------------------------------------
+// Cancellation
+// -----------------------------------------------------------------------------
+// Interrupt a compile or run from outside the VM. Poll zjs_wasCancelled()
+// to distinguish a cancellation from a genuine error, then clear the flag
+// before reusing the VM.
+void zjs_requestCancel(ZymVM* vm);
+void zjs_clearCancel(ZymVM* vm);
+int  zjs_wasCancelled(ZymVM* vm);
+
+// -----------------------------------------------------------------------------
+// Structured diagnostics
+// -----------------------------------------------------------------------------
+// Field indices for zjs_diagnosticField().
+#define ZJS_DIAGF_SEVERITY   0
+#define ZJS_DIAGF_FILE_ID    1
+#define ZJS_DIAGF_START_BYTE 2
+#define ZJS_DIAGF_LENGTH     3
+#define ZJS_DIAGF_LINE       4
+#define ZJS_DIAGF_COLUMN     5
+
+int         zjs_diagnosticCount(ZymVM* vm);
+int         zjs_diagnosticField(ZymVM* vm, int index, int field);
+const char* zjs_diagnosticMessage(ZymVM* vm, int index);
+const char* zjs_diagnosticCode(ZymVM* vm, int index);
+const char* zjs_diagnosticHint(ZymVM* vm, int index);
+void        zjs_clearDiagnostics(ZymVM* vm);
+
+// -----------------------------------------------------------------------------
+// Function probing
+// -----------------------------------------------------------------------------
+int zjs_hasFunction(ZymVM* vm, const char* name, int arity);
+
+// -----------------------------------------------------------------------------
+// Disassembly
+// -----------------------------------------------------------------------------
+// Returns a heap string the caller must release with zjs_freeString().
+char* zjs_disassembleChunk(ZymVM* vm, ZymChunk* chunk, const char* name);
+void  zjs_freeString(char* s);
+
+// -----------------------------------------------------------------------------
+// Module loading
+// -----------------------------------------------------------------------------
+// Compiles `source` as an entry module, pulling imports through the JS
+// hooks `Module.__zjs_moduleRead` (required) and `Module.__zjs_moduleResolve`
+// (optional, enabled by `use_resolver`). Both are synchronous: the host
+// resolves any async work before calling in. Writes a new chunk to
+// `out_chunk` on success.
+int zjs_compileWithModules(ZymVM* vm, const char* source, const char* entry_file,
+                           int debug_names, int include_line_info,
+                           int use_resolver, ZymChunk** out_chunk);
+
+// Import-frame introspection, valid only during a read/resolve callback.
+int         zjs_currentImportDepth(ZymVM* vm);
+const char* zjs_currentImportPathAt(ZymVM* vm, int index);
+const char* zjs_currentImportCaller(ZymVM* vm);
+
+// -----------------------------------------------------------------------------
 // Build info
 // -----------------------------------------------------------------------------
+// Keep in sync with package.json "version".
+#define ZJS_VERSION "0.3.0-alpha.3"
 const char* zjs_version(void);
 
 #ifdef __cplusplus

@@ -610,6 +610,8 @@ var tempI64;
 // === Body ===
 
 function zjs_js_dispatch(cb_id,vm_ptr,arity,args_ptr,is_variadic,vargs_ptr,vargc,out_is_error) { if (typeof Module.__zjs_nativeDispatch !== "function") { HEAP32[out_is_error >> 2] = 1; return 0; } return Module.__zjs_nativeDispatch( cb_id, vm_ptr, arity, args_ptr, is_variadic, vargs_ptr, vargc, out_is_error); }
+function zjs_js_moduleRead(vm_ptr,path) { if (typeof Module.__zjs_moduleRead !== "function") return 0; const src = Module.__zjs_moduleRead(vm_ptr, UTF8ToString(path)); if (typeof src !== "string") return 0; const len = lengthBytesUTF8(src) + 1; const buf = _malloc(len); stringToUTF8(src, buf, len); return buf; }
+function zjs_js_moduleResolve(vm_ptr,spec,importer) { if (typeof Module.__zjs_moduleResolve !== "function") return 0; const res = Module.__zjs_moduleResolve( vm_ptr, UTF8ToString(spec), importer ? UTF8ToString(importer) : null); if (typeof res !== "string") return 0; const len = lengthBytesUTF8(res) + 1; const buf = _malloc(len); stringToUTF8(res, buf, len); return buf; }
 function zjs_js_on_error(vm_ptr,type,file,line,msg) { if (typeof Module.__zjs_onError === "function") { Module.__zjs_onError( vm_ptr, type, file ? UTF8ToString(file) : "", line, msg ? UTF8ToString(msg) : ""); } }
 
 // end include: preamble.js
@@ -673,6 +675,108 @@ function zjs_js_on_error(vm_ptr,type,file,line,msg) { if (typeof Module.__zjs_on
   var stackRestore = (val) => __emscripten_stack_restore(val);
 
   var stackSave = () => _emscripten_stack_get_current();
+
+  var UTF8Decoder = typeof TextDecoder != 'undefined' ? new TextDecoder() : undefined;
+  
+    /**
+     * Given a pointer 'idx' to a null-terminated UTF8-encoded string in the given
+     * array that contains uint8 values, returns a copy of that string as a
+     * Javascript String object.
+     * heapOrArray is either a regular array, or a JavaScript typed array view.
+     * @param {number=} idx
+     * @param {number=} maxBytesToRead
+     * @return {string}
+     */
+  var UTF8ArrayToString = (heapOrArray, idx = 0, maxBytesToRead = NaN) => {
+      var endIdx = idx + maxBytesToRead;
+      var endPtr = idx;
+      // TextDecoder needs to know the byte length in advance, it doesn't stop on
+      // null terminator by itself.  Also, use the length info to avoid running tiny
+      // strings through TextDecoder, since .subarray() allocates garbage.
+      // (As a tiny code save trick, compare endPtr against endIdx using a negation,
+      // so that undefined/NaN means Infinity)
+      while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
+  
+      if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
+        return UTF8Decoder.decode(heapOrArray.subarray(idx, endPtr));
+      }
+      var str = '';
+      // If building with TextDecoder, we have already computed the string length
+      // above, so test loop end condition against that
+      while (idx < endPtr) {
+        // For UTF8 byte structure, see:
+        // http://en.wikipedia.org/wiki/UTF-8#Description
+        // https://www.ietf.org/rfc/rfc2279.txt
+        // https://tools.ietf.org/html/rfc3629
+        var u0 = heapOrArray[idx++];
+        if (!(u0 & 0x80)) { str += String.fromCharCode(u0); continue; }
+        var u1 = heapOrArray[idx++] & 63;
+        if ((u0 & 0xE0) == 0xC0) { str += String.fromCharCode(((u0 & 31) << 6) | u1); continue; }
+        var u2 = heapOrArray[idx++] & 63;
+        if ((u0 & 0xF0) == 0xE0) {
+          u0 = ((u0 & 15) << 12) | (u1 << 6) | u2;
+        } else {
+          u0 = ((u0 & 7) << 18) | (u1 << 12) | (u2 << 6) | (heapOrArray[idx++] & 63);
+        }
+  
+        if (u0 < 0x10000) {
+          str += String.fromCharCode(u0);
+        } else {
+          var ch = u0 - 0x10000;
+          str += String.fromCharCode(0xD800 | (ch >> 10), 0xDC00 | (ch & 0x3FF));
+        }
+      }
+      return str;
+    };
+  
+    /**
+     * Given a pointer 'ptr' to a null-terminated UTF8-encoded string in the
+     * emscripten HEAP, returns a copy of that string as a Javascript String object.
+     *
+     * @param {number} ptr
+     * @param {number=} maxBytesToRead - An optional length that specifies the
+     *   maximum number of bytes to read. You can omit this parameter to scan the
+     *   string until the first 0 byte. If maxBytesToRead is passed, and the string
+     *   at [ptr, ptr+maxBytesToReadr[ contains a null byte in the middle, then the
+     *   string will cut short at that byte index (i.e. maxBytesToRead will not
+     *   produce a string of exact length [ptr, ptr+maxBytesToRead[) N.B. mixing
+     *   frequent uses of UTF8ToString() with and without maxBytesToRead may throw
+     *   JS JIT optimizations off, so it is worth to consider consistently using one
+     * @return {string}
+     */
+  var UTF8ToString = (ptr, maxBytesToRead) => {
+      return ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead) : '';
+    };
+  var SYSCALLS = {
+  varargs:undefined,
+  getStr(ptr) {
+        var ret = UTF8ToString(ptr);
+        return ret;
+      },
+  };
+  function ___syscall_fcntl64(fd, cmd, varargs) {
+  SYSCALLS.varargs = varargs;
+  
+      return 0;
+    }
+
+  function ___syscall_ioctl(fd, op, varargs) {
+  SYSCALLS.varargs = varargs;
+  
+      return 0;
+    }
+
+  function syscallGetVarargI() {
+      // the `+` prepended here is necessary to convince the JSCompiler that varargs is indeed a number.
+      var ret = HEAP32[((+SYSCALLS.varargs)>>2)];
+      SYSCALLS.varargs += 4;
+      return ret;
+    }
+  
+  function ___syscall_openat(dirfd, path, flags, varargs) {
+  SYSCALLS.varargs = varargs;
+  
+  }
 
   var __abort_js = () => {
       abort('');
@@ -842,6 +946,10 @@ function zjs_js_on_error(vm_ptr,type,file,line,msg) { if (typeof Module.__zjs_on
       return 52;
     };
 
+  var _fd_read = (fd, iov, iovcnt, pnum) => {
+      return 52;
+    };
+
   var convertI32PairToI53Checked = (lo, hi) => {
       return ((hi + 0x200000) >>> 0 < 0x400001 - !!lo) ? (lo >>> 0) + hi * 4294967296 : NaN;
     };
@@ -855,58 +963,6 @@ function zjs_js_on_error(vm_ptr,type,file,line,msg) { if (typeof Module.__zjs_on
 
   var printCharBuffers = [null,[],[]];
   
-  var UTF8Decoder = typeof TextDecoder != 'undefined' ? new TextDecoder() : undefined;
-  
-    /**
-     * Given a pointer 'idx' to a null-terminated UTF8-encoded string in the given
-     * array that contains uint8 values, returns a copy of that string as a
-     * Javascript String object.
-     * heapOrArray is either a regular array, or a JavaScript typed array view.
-     * @param {number=} idx
-     * @param {number=} maxBytesToRead
-     * @return {string}
-     */
-  var UTF8ArrayToString = (heapOrArray, idx = 0, maxBytesToRead = NaN) => {
-      var endIdx = idx + maxBytesToRead;
-      var endPtr = idx;
-      // TextDecoder needs to know the byte length in advance, it doesn't stop on
-      // null terminator by itself.  Also, use the length info to avoid running tiny
-      // strings through TextDecoder, since .subarray() allocates garbage.
-      // (As a tiny code save trick, compare endPtr against endIdx using a negation,
-      // so that undefined/NaN means Infinity)
-      while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
-  
-      if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
-        return UTF8Decoder.decode(heapOrArray.subarray(idx, endPtr));
-      }
-      var str = '';
-      // If building with TextDecoder, we have already computed the string length
-      // above, so test loop end condition against that
-      while (idx < endPtr) {
-        // For UTF8 byte structure, see:
-        // http://en.wikipedia.org/wiki/UTF-8#Description
-        // https://www.ietf.org/rfc/rfc2279.txt
-        // https://tools.ietf.org/html/rfc3629
-        var u0 = heapOrArray[idx++];
-        if (!(u0 & 0x80)) { str += String.fromCharCode(u0); continue; }
-        var u1 = heapOrArray[idx++] & 63;
-        if ((u0 & 0xE0) == 0xC0) { str += String.fromCharCode(((u0 & 31) << 6) | u1); continue; }
-        var u2 = heapOrArray[idx++] & 63;
-        if ((u0 & 0xF0) == 0xE0) {
-          u0 = ((u0 & 15) << 12) | (u1 << 6) | u2;
-        } else {
-          u0 = ((u0 & 7) << 18) | (u1 << 12) | (u2 << 6) | (heapOrArray[idx++] & 63);
-        }
-  
-        if (u0 < 0x10000) {
-          str += String.fromCharCode(u0);
-        } else {
-          var ch = u0 - 0x10000;
-          str += String.fromCharCode(0xD800 | (ch >> 10), 0xDC00 | (ch & 0x3FF));
-        }
-      }
-      return str;
-    };
   var printChar = (stream, curr) => {
       var buffer = printCharBuffers[stream];
       if (curr === 0 || curr === 10) {
@@ -924,32 +980,6 @@ function zjs_js_on_error(vm_ptr,type,file,line,msg) { if (typeof Module.__zjs_on
     };
   
   
-  
-    /**
-     * Given a pointer 'ptr' to a null-terminated UTF8-encoded string in the
-     * emscripten HEAP, returns a copy of that string as a Javascript String object.
-     *
-     * @param {number} ptr
-     * @param {number=} maxBytesToRead - An optional length that specifies the
-     *   maximum number of bytes to read. You can omit this parameter to scan the
-     *   string until the first 0 byte. If maxBytesToRead is passed, and the string
-     *   at [ptr, ptr+maxBytesToReadr[ contains a null byte in the middle, then the
-     *   string will cut short at that byte index (i.e. maxBytesToRead will not
-     *   produce a string of exact length [ptr, ptr+maxBytesToRead[) N.B. mixing
-     *   frequent uses of UTF8ToString() with and without maxBytesToRead may throw
-     *   JS JIT optimizations off, so it is worth to consider consistently using one
-     * @return {string}
-     */
-  var UTF8ToString = (ptr, maxBytesToRead) => {
-      return ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead) : '';
-    };
-  var SYSCALLS = {
-  varargs:undefined,
-  getStr(ptr) {
-        var ret = UTF8ToString(ptr);
-        return ret;
-      },
-  };
   var _fd_write = (fd, iov, iovcnt, pnum) => {
       // hack to support printf in SYSCALLS_REQUIRE_FILESYSTEM=0
       var num = 0;
@@ -1149,6 +1179,12 @@ function zjs_js_on_error(vm_ptr,type,file,line,msg) { if (typeof Module.__zjs_on
 
 var wasmImports = {
   /** @export */
+  __syscall_fcntl64: ___syscall_fcntl64,
+  /** @export */
+  __syscall_ioctl: ___syscall_ioctl,
+  /** @export */
+  __syscall_openat: ___syscall_openat,
+  /** @export */
   _abort_js: __abort_js,
   /** @export */
   _emscripten_memcpy_js: __emscripten_memcpy_js,
@@ -1163,11 +1199,17 @@ var wasmImports = {
   /** @export */
   fd_close: _fd_close,
   /** @export */
+  fd_read: _fd_read,
+  /** @export */
   fd_seek: _fd_seek,
   /** @export */
   fd_write: _fd_write,
   /** @export */
   zjs_js_dispatch,
+  /** @export */
+  zjs_js_moduleRead,
+  /** @export */
+  zjs_js_moduleResolve,
   /** @export */
   zjs_js_on_error
 };
@@ -1220,6 +1262,22 @@ var _zjs_callFunction = Module['_zjs_callFunction'] = (a0, a1, a2, a3, a4) => (_
 var _malloc = Module['_malloc'] = (a0) => (_malloc = Module['_malloc'] = wasmExports['malloc'])(a0);
 var _zjs_callValue = Module['_zjs_callValue'] = (a0, a1, a2, a3, a4) => (_zjs_callValue = Module['_zjs_callValue'] = wasmExports['zjs_callValue'])(a0, a1, a2, a3, a4);
 var _zjs_setDispatchError = Module['_zjs_setDispatchError'] = (a0, a1) => (_zjs_setDispatchError = Module['_zjs_setDispatchError'] = wasmExports['zjs_setDispatchError'])(a0, a1);
+var _zjs_requestCancel = Module['_zjs_requestCancel'] = (a0) => (_zjs_requestCancel = Module['_zjs_requestCancel'] = wasmExports['zjs_requestCancel'])(a0);
+var _zjs_clearCancel = Module['_zjs_clearCancel'] = (a0) => (_zjs_clearCancel = Module['_zjs_clearCancel'] = wasmExports['zjs_clearCancel'])(a0);
+var _zjs_wasCancelled = Module['_zjs_wasCancelled'] = (a0) => (_zjs_wasCancelled = Module['_zjs_wasCancelled'] = wasmExports['zjs_wasCancelled'])(a0);
+var _zjs_diagnosticCount = Module['_zjs_diagnosticCount'] = (a0) => (_zjs_diagnosticCount = Module['_zjs_diagnosticCount'] = wasmExports['zjs_diagnosticCount'])(a0);
+var _zjs_diagnosticField = Module['_zjs_diagnosticField'] = (a0, a1, a2) => (_zjs_diagnosticField = Module['_zjs_diagnosticField'] = wasmExports['zjs_diagnosticField'])(a0, a1, a2);
+var _zjs_diagnosticMessage = Module['_zjs_diagnosticMessage'] = (a0, a1) => (_zjs_diagnosticMessage = Module['_zjs_diagnosticMessage'] = wasmExports['zjs_diagnosticMessage'])(a0, a1);
+var _zjs_diagnosticCode = Module['_zjs_diagnosticCode'] = (a0, a1) => (_zjs_diagnosticCode = Module['_zjs_diagnosticCode'] = wasmExports['zjs_diagnosticCode'])(a0, a1);
+var _zjs_diagnosticHint = Module['_zjs_diagnosticHint'] = (a0, a1) => (_zjs_diagnosticHint = Module['_zjs_diagnosticHint'] = wasmExports['zjs_diagnosticHint'])(a0, a1);
+var _zjs_clearDiagnostics = Module['_zjs_clearDiagnostics'] = (a0) => (_zjs_clearDiagnostics = Module['_zjs_clearDiagnostics'] = wasmExports['zjs_clearDiagnostics'])(a0);
+var _zjs_hasFunction = Module['_zjs_hasFunction'] = (a0, a1, a2) => (_zjs_hasFunction = Module['_zjs_hasFunction'] = wasmExports['zjs_hasFunction'])(a0, a1, a2);
+var _zjs_disassembleChunk = Module['_zjs_disassembleChunk'] = (a0, a1, a2) => (_zjs_disassembleChunk = Module['_zjs_disassembleChunk'] = wasmExports['zjs_disassembleChunk'])(a0, a1, a2);
+var _zjs_freeString = Module['_zjs_freeString'] = (a0) => (_zjs_freeString = Module['_zjs_freeString'] = wasmExports['zjs_freeString'])(a0);
+var _zjs_compileWithModules = Module['_zjs_compileWithModules'] = (a0, a1, a2, a3, a4, a5, a6) => (_zjs_compileWithModules = Module['_zjs_compileWithModules'] = wasmExports['zjs_compileWithModules'])(a0, a1, a2, a3, a4, a5, a6);
+var _zjs_currentImportDepth = Module['_zjs_currentImportDepth'] = (a0) => (_zjs_currentImportDepth = Module['_zjs_currentImportDepth'] = wasmExports['zjs_currentImportDepth'])(a0);
+var _zjs_currentImportPathAt = Module['_zjs_currentImportPathAt'] = (a0, a1) => (_zjs_currentImportPathAt = Module['_zjs_currentImportPathAt'] = wasmExports['zjs_currentImportPathAt'])(a0, a1);
+var _zjs_currentImportCaller = Module['_zjs_currentImportCaller'] = (a0) => (_zjs_currentImportCaller = Module['_zjs_currentImportCaller'] = wasmExports['zjs_currentImportCaller'])(a0);
 var _zjs_version = Module['_zjs_version'] = () => (_zjs_version = Module['_zjs_version'] = wasmExports['zjs_version'])();
 var __emscripten_tempret_set = (a0) => (__emscripten_tempret_set = wasmExports['_emscripten_tempret_set'])(a0);
 var __emscripten_tempret_get = () => (__emscripten_tempret_get = wasmExports['_emscripten_tempret_get'])();

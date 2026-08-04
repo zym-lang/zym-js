@@ -97,6 +97,32 @@ export interface CompileOptions {
     includeLineInfo?: boolean;
 }
 
+export type ZymDiagSeverity = "error" | "warning" | "info" | "hint";
+
+/** A structured frontend diagnostic. Mirrors `vm.diagnostics()` in the CLI. */
+export interface ZymDiagnostic {
+    severity: ZymDiagSeverity;
+    fileId: number;
+    startByte: number;
+    length: number;
+    line: number;
+    column: number;
+    message: string;
+    code?: string;
+    hint?: string;
+}
+
+export interface ModuleCompileOptions {
+    /** Entry file name used in diagnostics. Defaults to "<script>". */
+    file?: string;
+    /** Returns source for a resolved module path, or null if absent. */
+    read: (path: string) => string | null | undefined;
+    /** Maps a raw import specifier to a canonical key; null falls back to the default join. */
+    resolve?: (spec: string, importer: string | null) => string | null | undefined;
+    debugNames?: boolean;
+    includeLineInfo?: boolean;
+}
+
 export interface SerializeOptions {
     includeLineInfo?: boolean;
 }
@@ -135,6 +161,39 @@ export interface VM {
 
     /** Serialize a Chunk to bytecode. */
     serialize(chunk: Chunk, options?: SerializeOptions): Uint8Array;
+
+    /**
+     * Compile an entry module plus everything it imports. `read` and
+     * `resolve` are synchronous; do any fetching before calling.
+     */
+    compileWithModules(source: string, options: ModuleCompileOptions): Chunk;
+
+    /** Import chain being resolved, outermost first. Only valid inside a hook. */
+    importStack(): string[];
+
+    /** Module that issued the import being resolved, or null. */
+    importCaller(): string | null;
+
+    /** Structured diagnostics recorded since the last clear. */
+    diagnostics(): ZymDiagnostic[];
+
+    /** Drop every recorded diagnostic. */
+    clearDiagnostics(): void;
+
+    /** Ask the VM to stop at the next safe point. */
+    requestCancel(): void;
+
+    /** True if the last operation stopped due to `requestCancel()`. */
+    wasCancelled(): boolean;
+
+    /** Clear the cancellation flag before reusing the VM. */
+    clearCancel(): void;
+
+    /** True if a function with this name and arity is callable. */
+    hasFunction(name: string, arity: number): boolean;
+
+    /** Human-readable disassembly of a chunk. */
+    disassemble(chunk: Chunk, name?: string): string;
 
     /** Load bytecode produced by `serialize`. */
     loadBytecode(bytes: Uint8Array | ArrayBuffer): Chunk;

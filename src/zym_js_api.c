@@ -8,6 +8,9 @@
  */
 
 #include "zym_js_api.h"
+#include "zym/debug.h"
+#include "zym/module_loader.h"
+#include "zym/sourcemap.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -118,6 +121,36 @@ EM_JS(uint32_t, zjs_js_dispatch,
     return Module.__zjs_nativeDispatch(
         cb_id, vm_ptr, arity, args_ptr,
         is_variadic, vargs_ptr, vargc, out_is_error);
+});
+
+/* Module source provider. JS returns a malloc'd UTF-8 C string that C takes
+   ownership of, or 0 when the path cannot be resolved. Synchronous by
+   design: the host resolves any async work (fetch, fs) before calling in.
+   Asyncify/JSPI or a worker + Atomics can layer on top without changing
+   this contract. */
+EM_JS(char*, zjs_js_moduleRead, (uint32_t vm_ptr, const char* path), {
+    if (typeof Module.__zjs_moduleRead !== "function") return 0;
+    const src = Module.__zjs_moduleRead(vm_ptr, UTF8ToString(path));
+    if (typeof src !== "string") return 0;
+    const len = lengthBytesUTF8(src) + 1;
+    const buf = _malloc(len);
+    stringToUTF8(src, buf, len);
+    return buf;
+});
+
+/* Optional import-specifier resolver. Returns a malloc'd C string (the
+   canonical module key) or 0 to fall back to the loader's default path
+   join. `importer` is 0 for the entry module. */
+EM_JS(char*, zjs_js_moduleResolve,
+      (uint32_t vm_ptr, const char* spec, const char* importer), {
+    if (typeof Module.__zjs_moduleResolve !== "function") return 0;
+    const res = Module.__zjs_moduleResolve(
+        vm_ptr, UTF8ToString(spec), importer ? UTF8ToString(importer) : null);
+    if (typeof res !== "string") return 0;
+    const len = lengthBytesUTF8(res) + 1;
+    const buf = _malloc(len);
+    stringToUTF8(res, buf, len);
+    return buf;
 });
 
 EM_JS(void, zjs_js_on_error,
@@ -930,7 +963,138 @@ char* zjs_disassembleChunk(ZymVM* vm, ZymChunk* chunk, const char* name) {
 void zjs_freeString(char* s) { free(s); }
 
 /* -------------------------------------------------------------------------- */
+/* Module loading                                                             */
+/* -------------------------------------------------------------------------- */
+/* Mirrors what the CLI's `Zym` native exposes (registerSourceFile ->
+   preprocess -> loadModules -> compile), but collapsed into one entry point
+   so the JS side only has to answer "what is the source at this path?".
+   Everything below the boundary matches full_executor.cpp's pipeline. */
+
+/* The resolver must hand back a pointer that stays valid for the duration of
+   the call; the loader copies it immediately on return. wasm is
+   single-threaded, so one grow-on-demand scratch buffer is sufficient. */
+static char*  zjs_resolve_scratch = NULL;
+static size_t zjs_resolve_scratch_cap = 0;
+
+static const char* zjs_module_resolve(const char* spec, const char* importer,
+                                      void* user_data) {
+    ZymVM* vm = (ZymVM*)user_data;
+    char* resolved = zjs_js_moduleResolve((uint32_t)(uintptr_t)vm, spec, importer);
+    if (!resolved) return NULL;   /* fall back to the loader's default */
+
+    size_t need = strlen(resolved) + 1;
+    if (need > zjs_resolve_scratch_cap) {
+        char* grown = (char*)realloc(zjs_resolve_scratch, need);
+        if (!grown) { free(resolved); return NULL; }
+        zjs_resolve_scratch = grown;
+        zjs_resolve_scratch_cap = need;
+    }
+    memcpy(zjs_resolve_scratch, resolved, need);
+    free(resolved);
+    return zjs_resolve_scratch;
+}
+
+static ModuleReadResult zjs_module_read(const char* path, void* user_data) {
+    ModuleReadResult result = { NULL, NULL, ZYM_FILE_ID_INVALID };
+    ZymVM* vm = (ZymVM*)user_data;
+
+    char* raw = zjs_js_moduleRead((uint32_t)(uintptr_t)vm, path);
+    if (!raw) return result;   /* not found: loader reports a clean error */
+
+    ZymFileId file_id = zym_registerSourceFile(vm, path, raw, strlen(raw));
+    ZymSourceMap* map = zym_newSourceMap(vm);
+    const char* processed = NULL;
+    ZymStatus st = zym_preprocess(vm, raw, map, file_id, &processed);
+    free(raw);
+
+    if (st != ZYM_STATUS_OK) {
+        zym_freeSourceMap(vm, map);
+        return result;
+    }
+    result.source = (char*)processed;
+    result.source_map = map;
+    result.file_id = file_id;
+    return result;
+}
+
+int zjs_compileWithModules(ZymVM* vm, const char* source, const char* entry_file,
+                           int debug_names, int include_line_info,
+                           int use_resolver, ZymChunk** out_chunk) {
+    if (out_chunk) *out_chunk = NULL;
+    if (!vm || !source) return ZJS_BRIDGE_ERROR;
+    const char* entry = (entry_file && entry_file[0]) ? entry_file : "<script>";
+
+    ZymFileId entry_id = zym_registerSourceFile(vm, entry, source, strlen(source));
+    ZymSourceMap* entry_map = zym_newSourceMap(vm);
+    const char* processed = NULL;
+    ZymStatus st = zym_preprocess(vm, source, entry_map, entry_id, &processed);
+    if (st != ZYM_STATUS_OK) {
+        zym_freeSourceMap(vm, entry_map);
+        return (int)st;
+    }
+
+    ModuleLoadResult* mr = loadModulesEx(
+        vm, processed, entry_map, entry,
+        zjs_module_read,
+        use_resolver ? zjs_module_resolve : NULL,
+        vm,
+        debug_names ? true : false,
+        false, NULL);
+
+    zym_freeProcessedSource(vm, processed);
+
+    if (!mr) {
+        zym_freeSourceMap(vm, entry_map);
+        return ZJS_BRIDGE_ERROR;
+    }
+    if (mr->has_error) {
+        /* The loader's message is not a frontend diagnostic, so surface it
+           through the same error channel natives use. */
+        zym_runtimeError(vm, "%s", mr->error_message ? mr->error_message
+                                                     : "module loading failed");
+        freeModuleLoadResult(vm, mr);
+        zym_freeSourceMap(vm, entry_map);
+        return (int)ZYM_STATUS_COMPILE_ERROR;
+    }
+
+    ZymChunk* chunk = zym_newChunk(vm);
+    if (!chunk) {
+        freeModuleLoadResult(vm, mr);
+        zym_freeSourceMap(vm, entry_map);
+        return ZJS_BRIDGE_ERROR;
+    }
+
+    ZymCompilerConfig cfg = { .include_line_info = include_line_info ? true : false };
+    st = zym_compile(vm, mr->combined_source, chunk, mr->source_map, entry, cfg, NULL);
+
+    freeModuleLoadResult(vm, mr);
+    zym_freeSourceMap(vm, entry_map);
+
+    if (st != ZYM_STATUS_OK) {
+        zym_freeChunk(vm, chunk);
+        return (int)st;
+    }
+    if (out_chunk) *out_chunk = chunk;
+    return ZJS_OK;
+}
+
+/* Import-frame introspection. Only meaningful while a read or resolve
+   callback is executing; mirrors `vm.moduleLoader.getCaller()/getStack()`. */
+
+int zjs_currentImportDepth(ZymVM* vm) {
+    return vm ? zym_currentImportDepth(vm) : 0;
+}
+
+const char* zjs_currentImportPathAt(ZymVM* vm, int index) {
+    return vm ? zym_currentImportPathAt(vm, index) : NULL;
+}
+
+const char* zjs_currentImportCaller(ZymVM* vm) {
+    return vm ? zym_currentImportCaller(vm) : NULL;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Build info                                                                 */
 /* -------------------------------------------------------------------------- */
 
-const char* zjs_version(void) { return "zym-js " ZJS_VERSION_STRING; }
+const char* zjs_version(void) { return "zym-js " ZJS_VERSION; }

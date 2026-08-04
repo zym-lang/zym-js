@@ -41,6 +41,9 @@ const STATUS = Object.freeze({
     OK: 0, COMPILE_ERROR: 1, RUNTIME_ERROR: 2, YIELD: 3, BRIDGE_ERROR: 100,
 });
 
+// ZymDiagSeverity mirror (zym_core/include/zym/diagnostics.h).
+const SEVERITY = ["error", "warning", "info", "hint"];
+
 // ---------------------------------------------------------------------------
 // ZymError: thrown from vm.compile / vm.run when the underlying VM raises a
 // compile or runtime error. Errors collected via the error callback are
@@ -159,6 +162,9 @@ export default Zym;
 // (used by the native-dispatch trampoline) and the error bus.
 // ---------------------------------------------------------------------------
 class Bridge {
+    /** vmPtr -> { read, resolve } for the in-flight compileWithModules call. */
+    static _moduleHooks = new Map();
+
     constructor(Module) {
         this.M = Module;
         this.nextCbId = 1;
@@ -180,6 +186,21 @@ class Bridge {
             let bucket = this.pendingErrors.get(vmPtr);
             if (!bucket) { bucket = []; this.pendingErrors.set(vmPtr, bucket); }
             bucket.push(entry);
+        };
+
+        // Module source hooks. Populated per-call by compileWithModules();
+        // the bridge calls these synchronously while resolving imports.
+        Module.__zjs_moduleRead = (vmPtr, path) => {
+            const h = Bridge._moduleHooks.get(vmPtr);
+            if (!h || typeof h.read !== "function") return null;
+            const src = h.read(path);
+            return typeof src === "string" ? src : null;
+        };
+        Module.__zjs_moduleResolve = (vmPtr, spec, importer) => {
+            const h = Bridge._moduleHooks.get(vmPtr);
+            if (!h || typeof h.resolve !== "function") return null;
+            const r = h.resolve(spec, importer);
+            return typeof r === "string" ? r : null;
         };
 
         Module.__zjs_nativeDispatch = (
@@ -485,6 +506,167 @@ class VM {
         } finally {
             M._free(bufPtrPtr);
             M._free(sizePtr);
+        }
+    }
+
+    /**
+     * Structured diagnostics recorded by the frontend since the last clear.
+     * Mirrors `vm.diagnostics()` on the CLI's `Zym` native. Each record is
+     * `{ severity, fileId, startByte, length, line, column, message,
+     *    code?, hint? }`. Severity is one of "error" | "warning" | "info"
+     * | "hint". Reading does not clear; call `clearDiagnostics()` for that.
+     */
+    /**
+     * Compile an entry module plus everything it imports.
+     *
+     * `read(path)` returns the source text for a resolved module path, or
+     * null if it does not exist. `resolve(spec, importer)` is optional and
+     * maps a raw import specifier to a canonical key; return null to fall
+     * back to the loader's default path join. `importer` is null while
+     * resolving the entry module.
+     *
+     * Both hooks are synchronous, so do any fetching before calling.
+     *
+     * @example
+     *   const files = new Map([["./util.zym", "func double(n){ return n*2 }"]]);
+     *   const chunk = vm.compileWithModules(entry, { read: (p) => files.get(p) ?? null });
+     */
+    compileWithModules(source, {
+        file = "<script>", read, resolve,
+        debugNames = true, includeLineInfo = true,
+    } = {}) {
+        this._checkAlive();
+        if (typeof read !== "function") {
+            throw new TypeError("compileWithModules requires a read(path) function");
+        }
+        const M = this._M;
+        const srcPtr = _strToWasm(M, source);
+        const filePtr = _strToWasm(M, file);
+        const outPtr = M._malloc(4);
+        Bridge._moduleHooks.set(this._ptr, { read, resolve });
+        try {
+            this._drainErrors();
+            const status = M._zjs_compileWithModules(
+                this._ptr, srcPtr, filePtr,
+                debugNames ? 1 : 0, includeLineInfo ? 1 : 0,
+                typeof resolve === "function" ? 1 : 0, outPtr);
+            if (status !== STATUS.OK) {
+                this._throwFromStatus(status, "compileWithModules failed");
+            }
+            return new Chunk(this, M.HEAPU32[outPtr >> 2]);
+        } finally {
+            Bridge._moduleHooks.delete(this._ptr);
+            M._free(srcPtr);
+            M._free(filePtr);
+            M._free(outPtr);
+        }
+    }
+
+    /**
+     * The import chain being resolved, outermost first. Only meaningful
+     * inside a `read` or `resolve` hook; returns [] otherwise.
+     */
+    importStack() {
+        this._checkAlive();
+        const M = this._M;
+        const depth = M._zjs_currentImportDepth(this._ptr);
+        const out = [];
+        for (let i = 0; i < depth; i++) {
+            const p = M._zjs_currentImportPathAt(this._ptr, i);
+            out.push(p ? M.UTF8ToString(p) : "");
+        }
+        return out;
+    }
+
+    /** The module that issued the import being resolved, or null. */
+    importCaller() {
+        this._checkAlive();
+        const p = this._M._zjs_currentImportCaller(this._ptr);
+        return p ? this._M.UTF8ToString(p) : null;
+    }
+
+    diagnostics() {
+        this._checkAlive();
+        const M = this._M;
+        const count = M._zjs_diagnosticCount(this._ptr);
+        const out = [];
+        for (let i = 0; i < count; i++) {
+            const f = (field) => M._zjs_diagnosticField(this._ptr, i, field);
+            const s = (ptr) => (ptr ? M.UTF8ToString(ptr) : null);
+            const rec = {
+                severity: SEVERITY[f(0)] ?? "error",
+                fileId: f(1),
+                startByte: f(2),
+                length: f(3),
+                line: f(4),
+                column: f(5),
+                message: s(M._zjs_diagnosticMessage(this._ptr, i)) ?? "",
+            };
+            const code = s(M._zjs_diagnosticCode(this._ptr, i));
+            const hint = s(M._zjs_diagnosticHint(this._ptr, i));
+            if (code) rec.code = code;
+            if (hint) rec.hint = hint;
+            out.push(rec);
+        }
+        return out;
+    }
+
+    /** Drop every recorded diagnostic. */
+    clearDiagnostics() {
+        this._checkAlive();
+        this._M._zjs_clearDiagnostics(this._ptr);
+    }
+
+    /**
+     * Ask the VM to stop at the next safe point. Safe to call while a
+     * compile or run is in flight, which is how a host stops a runaway
+     * script without tearing down the VM.
+     */
+    requestCancel() {
+        this._checkAlive();
+        this._M._zjs_requestCancel(this._ptr);
+    }
+
+    /** True if the last operation stopped because of `requestCancel()`. */
+    wasCancelled() {
+        this._checkAlive();
+        return this._M._zjs_wasCancelled(this._ptr) !== 0;
+    }
+
+    /** Clear the cancellation flag before reusing the VM. */
+    clearCancel() {
+        this._checkAlive();
+        this._M._zjs_clearCancel(this._ptr);
+    }
+
+    /** True if a function with this name and arity is callable. */
+    hasFunction(name, arity) {
+        this._checkAlive();
+        const M = this._M;
+        const namePtr = _strToWasm(M, name);
+        try {
+            return M._zjs_hasFunction(this._ptr, namePtr, arity | 0) !== 0;
+        } finally {
+            M._free(namePtr);
+        }
+    }
+
+    /**
+     * Human-readable disassembly of a chunk. Mirrors the CLI's
+     * `vm.disassembleChunk(chunk, name)` and the `zym --dump` output.
+     */
+    disassemble(chunk, name = "chunk") {
+        this._checkAlive();
+        const M = this._M;
+        const namePtr = _strToWasm(M, name);
+        let strPtr = 0;
+        try {
+            strPtr = M._zjs_disassembleChunk(this._ptr, chunk._ptr, namePtr);
+            if (!strPtr) throw new Error("disassemble failed");
+            return M.UTF8ToString(strPtr);
+        } finally {
+            if (strPtr) M._zjs_freeString(strPtr);
+            M._free(namePtr);
         }
     }
 
