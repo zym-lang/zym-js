@@ -618,13 +618,16 @@ int zjs_compile(ZymVM* vm, const char* source, const char* entry_file,
 
     ZymChunk* chunk = zym_newChunk(vm);
     if (!chunk) return ZJS_BRIDGE_ERROR;
-    ZymLineMap* map = include_line_info ? zym_newLineMap(vm) : NULL;
+    /* LineMap was replaced by SourceMap in core v0.3.0: origin tracking is
+       byte-granular and carries an originating file id. Only allocated when
+       line info is requested; the compiler accepts NULL otherwise. */
+    ZymSourceMap* map = include_line_info ? zym_newSourceMap(vm) : NULL;
 
     ZymCompilerConfig cfg = { .include_line_info = include_line_info ? true : false };
     ZymStatus st = zym_compile(vm, source, chunk, map,
-                               entry_file ? entry_file : "<script>", cfg);
+                               entry_file ? entry_file : "<script>", cfg, NULL);
 
-    if (map) zym_freeLineMap(vm, map);
+    if (map) zym_freeSourceMap(vm, map);
 
     if (st != ZYM_STATUS_OK) {
         zym_freeChunk(vm, chunk);
@@ -814,7 +817,120 @@ void zjs_setDispatchError(ZymVM* vm, const char* message) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Cancellation                                                               */
+/* -------------------------------------------------------------------------- */
+/* Lets a host interrupt a long compile or run from outside the VM. In a
+   browser that means a runaway script can be stopped without killing the
+   tab; the caller polls zjs_wasCancelled() to tell a cancellation apart
+   from a genuine error, then clears the flag before reusing the VM. */
+
+void zjs_requestCancel(ZymVM* vm) { if (vm) zym_requestCancel(vm); }
+void zjs_clearCancel(ZymVM* vm)   { if (vm) zym_clearCancel(vm); }
+int  zjs_wasCancelled(ZymVM* vm)  { return (vm && zym_wasCancelled(vm)) ? 1 : 0; }
+
+/* -------------------------------------------------------------------------- */
+/* Structured diagnostics                                                     */
+/* -------------------------------------------------------------------------- */
+/* The VM records every frontend error as a structured record rather than
+   writing to stderr. These accessors mirror what the CLI's `Zym` native
+   exposes as `vm.diagnostics()`, read one field at a time so nothing has
+   to marshal a struct across the wasm boundary. Pointers returned here are
+   owned by the VM and stay valid until the next clear or push. */
+
+enum {
+    ZJS_DIAG_SEVERITY  = 0,
+    ZJS_DIAG_FILE_ID   = 1,
+    ZJS_DIAG_START_BYTE = 2,
+    ZJS_DIAG_LENGTH    = 3,
+    ZJS_DIAG_LINE      = 4,
+    ZJS_DIAG_COLUMN    = 5
+};
+
+int zjs_diagnosticCount(ZymVM* vm) {
+    if (!vm) return 0;
+    size_t count = 0;
+    zymGetDiagnostics(vm, &count);
+    return (int)count;
+}
+
+static const ZymDiagnostic* zjs_diag_at(ZymVM* vm, int index) {
+    if (!vm || index < 0) return NULL;
+    size_t count = 0;
+    const ZymDiagnostic* diags = zymGetDiagnostics(vm, &count);
+    if (!diags || (size_t)index >= count) return NULL;
+    return &diags[index];
+}
+
+int zjs_diagnosticField(ZymVM* vm, int index, int field) {
+    const ZymDiagnostic* d = zjs_diag_at(vm, index);
+    if (!d) return -1;
+    switch (field) {
+        case ZJS_DIAG_SEVERITY:   return (int)d->severity;
+        case ZJS_DIAG_FILE_ID:    return (int)d->fileId;
+        case ZJS_DIAG_START_BYTE: return d->startByte;
+        case ZJS_DIAG_LENGTH:     return d->length;
+        case ZJS_DIAG_LINE:       return d->line;
+        case ZJS_DIAG_COLUMN:     return d->column;
+        default:                  return -1;
+    }
+}
+
+const char* zjs_diagnosticMessage(ZymVM* vm, int index) {
+    const ZymDiagnostic* d = zjs_diag_at(vm, index);
+    return d ? d->message : NULL;
+}
+
+const char* zjs_diagnosticCode(ZymVM* vm, int index) {
+#if ZYM_HAS_DIAGNOSTIC_CODES
+    const ZymDiagnostic* d = zjs_diag_at(vm, index);
+    return d ? d->code : NULL;
+#else
+    (void)vm; (void)index; return NULL;
+#endif
+}
+
+const char* zjs_diagnosticHint(ZymVM* vm, int index) {
+#if ZYM_HAS_DIAGNOSTIC_CODES
+    const ZymDiagnostic* d = zjs_diag_at(vm, index);
+    return d ? d->hint : NULL;
+#else
+    (void)vm; (void)index; return NULL;
+#endif
+}
+
+void zjs_clearDiagnostics(ZymVM* vm) { if (vm) zymClearDiagnostics(vm); }
+
+/* -------------------------------------------------------------------------- */
+/* Function probing                                                           */
+/* -------------------------------------------------------------------------- */
+
+int zjs_hasFunction(ZymVM* vm, const char* name, int arity) {
+    if (!vm || !name) return 0;
+    return zym_hasFunction(vm, name, arity) ? 1 : 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Disassembly                                                                */
+/* -------------------------------------------------------------------------- */
+/* Renders a chunk's listing into a heap string the caller must free with
+   zjs_freeString(). Mirrors the CLI's `vm.disassembleChunk(chunk, name)`.
+   Uses an in-memory stream so nothing touches stdout. */
+
+char* zjs_disassembleChunk(ZymVM* vm, ZymChunk* chunk, const char* name) {
+    if (!vm || !chunk) return NULL;
+    char* buf = NULL;
+    size_t len = 0;
+    FILE* out = open_memstream(&buf, &len);
+    if (!out) return NULL;
+    disassembleChunkToFile(chunk, name && name[0] ? name : "chunk", out);
+    if (fclose(out) != 0) { free(buf); return NULL; }
+    return buf;   /* NUL-terminated by open_memstream */
+}
+
+void zjs_freeString(char* s) { free(s); }
+
+/* -------------------------------------------------------------------------- */
 /* Build info                                                                 */
 /* -------------------------------------------------------------------------- */
 
-const char* zjs_version(void) { return "zym-js 0.1.0"; }
+const char* zjs_version(void) { return "zym-js " ZJS_VERSION_STRING; }

@@ -1,7 +1,7 @@
 {
   "name": "@zym-lang/zym-js",
   "version": "0.3.0-alpha.2",
-  "description": "JavaScript / WebAssembly bindings for the Zym scripting language. Embed a Zym VM in Node, the browser, or a Web Worker — compile and run scripts, register JS functions as Zym natives, define globals, save/load bytecode, and call script functions from JS.",
+  "description": "JavaScript / WebAssembly bindings for the Zym scripting language. Embed a Zym VM in Node, the browser, or a Web Worker \u2014 compile and run scripts, register JS functions as Zym natives, define globals, save/load bytecode, and call script functions from JS.",
   "type": "module",
   "main": "./js/zym.mjs",
   "module": "./js/zym.mjs",
@@ -26,10 +26,11 @@
   ],
   "scripts": {
     "build": "cmake --build cmake-build-wasm --target zym_js",
-    "test": "npm run test:smoke && npm run test:regressions",
+    "test": "npm run test:smoke && npm run test:regressions && npm run test:bytecode",
     "test:smoke": "node test/node-smoke.mjs",
     "test:regressions": "node test/run-core-tests.mjs",
-    "test:raw": "node test/run-core-tests-raw.mjs"
+    "test:raw": "node test/run-core-tests-raw.mjs",
+    "test:bytecode": "node test/bytecode-roundtrip.mjs"
   },
   "keywords": [
     "zym",
