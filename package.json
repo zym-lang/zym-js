@@ -26,14 +26,15 @@
   ],
   "scripts": {
     "build": "cmake --build cmake-build-wasm --target zym_js",
-    "test": "npm run test:smoke && npm run test:regressions && npm run test:bytecode && npm run test:api && npm run test:modules && npm run test:sandbox",
+    "test": "npm run test:smoke && npm run test:regressions && npm run test:bytecode && npm run test:api && npm run test:modules && npm run test:sandbox && npm run test:docs",
     "test:smoke": "node test/node-smoke.mjs",
     "test:regressions": "node test/run-core-tests.mjs",
     "test:raw": "node test/run-core-tests-raw.mjs",
     "test:bytecode": "node test/bytecode-roundtrip.mjs",
     "test:api": "node test/api-surface.mjs",
     "test:modules": "node test/modules.mjs",
-    "test:sandbox": "node test/sandbox.mjs"
+    "test:sandbox": "node test/sandbox.mjs",
+    "test:docs": "node test/doc-examples.mjs"
   },
   "keywords": [
     "zym",

@@ -24,6 +24,7 @@ JavaScript / WebAssembly bindings for the [Zym](https://github.com/zym-lang) scr
   - [`vm.serialize(chunk)` / `vm.loadBytecode(bytes)`](#vmserializechunk--vmloadbytecodebytes)
   - [`vm.defineGlobal(name, value)`](#vmdefineglobalname-value)
   - [`vm.call(funcName, ...args)`](#vmcallfuncname-args)
+  - [`vm.hasFunc(name, arity?)` / `vm.getFunc(name)`](#vmhasfuncname-arity--vmgetfuncname)
   - [`vm.on("error", listener)`](#vmonerror-listener)
   - [`vm.free()`](#vmfree)
 - [Registering native functions](#registering-native-functions)
@@ -32,6 +33,14 @@ JavaScript / WebAssembly bindings for the [Zym](https://github.com/zym-lang) scr
   - [Variadic natives](#variadic-natives)
   - [Closures (capturing JS state)](#closures-capturing-js-state)
   - [Errors inside a native](#errors-inside-a-native)
+- [Sandboxing](#sandboxing)
+  - [Preemption entries](#preemption-entries)
+  - [Stopping runaway code](#stopping-runaway-code)
+  - [An event pump into the script](#an-event-pump-into-the-script)
+  - [Capping memory](#capping-memory)
+  - [Stopping on demand](#stopping-on-demand)
+  - [Inspecting a stopped VM](#inspecting-a-stopped-vm)
+  - [Resuming](#resuming)
 - [Values](#values)
   - [`ZymValue` wrapper](#zymvalue-wrapper)
   - [`toJS()` decoding rules](#tojs-decoding-rules)
@@ -192,6 +201,31 @@ const add10 = vm.call("makeAdder", 10);   // decoded as a JS callable
 add10(5);                                  // 15  (uses callValue under the hood)
 ```
 
+### `vm.hasFunc(name, arity?)` / `vm.getFunc(name)`
+
+Find out whether a script defines something before you call it.
+
+`hasFunc` with one argument is true if *any* callable by that name exists, at any arity. With two, it asks whether a call with exactly that many arguments would dispatch, which includes a variadic whose fixed prefix is short enough.
+
+```js
+vm.run(`func main(...args) { return length(args) }`);
+
+vm.hasFunc("main");          // true
+vm.hasFunc("main", 3);       // true  -- variadic accepts 3
+vm.hasFunction("main", 3);   // false -- strict exact-slot probe
+```
+
+That last line is why `hasFunc` exists: `hasFunction` matches a fixed arity slot exactly, so it misses a variadic entry point. Use `hasFunc` for discovery, `hasFunction` when you mean a precise signature.
+
+`getFunc` returns a reusable callable, or `null` if there is no such function. The name is resolved once and the result is identity-stable, so it works as a `Map` key.
+
+```js
+const main = vm.getFunc("main");
+if (main) main(1, 2, 3);
+
+vm.getFunc("main") === main;   // true
+```
+
 ### `vm.on("error", listener)`
 
 Subscribe to compile and runtime errors as a stream. Fires in addition to the thrown `ZymError` (useful for logging multiple diagnostics from a single compile).
@@ -287,6 +321,178 @@ vm.registerNative("parseJSON(src)", (src) => {
     catch (e) { throw new Error(`bad json: ${e.message}`); }
 });
 ```
+
+---
+
+## Sandboxing
+
+Running code you did not write means being able to take control back from it. A script can loop forever, allocate without end, or simply take longer than you are willing to wait, and none of that should be able to hang the page or exhaust the tab.
+
+zym-js gives you three bounds, all of which **suspend** the VM rather than destroy it: the frames, stack, and instruction pointer stay intact, so you can inspect what happened and continue if you want to.
+
+### Preemption entries
+
+A preemption entry says "hand control back every N instructions". Slices count VM instructions, not milliseconds, so they are deterministic and machine-independent.
+
+```js
+const id = vm.addPreempt(slice, handler?);
+vm.removePreempt(id);
+vm.setPreemptSlice(id, slice);   // retune its cadence
+```
+
+Whether you pass a handler is the whole distinction:
+
+| | |
+| --- | --- |
+| **with a handler** | it runs, then execution continues automatically |
+| **without one** | there is nothing to run, so the VM stays suspended and `run()` throws `ZymSuspended` |
+
+Entries are independent. You can have several at different slices, each with its own handler, and each is addressed by its own id. The table holds 32 per VM; `addPreempt` throws if it is full.
+
+### Stopping runaway code
+
+An entry with no handler is the simplest thing you can build: a hard bound on how long a script may run.
+
+```js
+const vm = await Zym.newVM();
+vm.addPreempt(1_000_000);                     // no handler: hand control back
+
+try {
+    vm.run(`var i = 0
+while (true) { i = i + 1 }`);
+} catch (e) {
+    if (e instanceof ZymSuspended) {
+        console.log("stopped:", e.cause === CAUSE.PREEMPT ? "ran too long" : "other");
+    } else throw e;
+}
+```
+
+```
+stopped: ran too long
+```
+
+`ZymSuspended` is deliberately not the same as `ZymError`. One means *you* stopped it, the other means it failed on its own, and you almost always want to report those differently.
+
+### An event pump into the script
+
+Give the entry a handler and it becomes something more useful than a limit: a periodic hook. The handler may call into the parked VM, so a script can expose its own trigger and let the host drive it.
+
+```js
+const vm = await Zym.newVM();
+
+vm.addPreempt(200_000, () => {
+    vm.call("onTick");                        // the script's own hook
+});
+
+vm.run(`
+var beats = 0
+func onTick() { beats = beats + 1 }
+
+var total = 0
+var i = 0
+while (i < 1000000) { total = total + i
+ i = i + 1 }
+func beatCount() { return beats }
+`);
+
+console.log("script saw", vm.call("beatCount"), "ticks");
+```
+
+```
+script saw 50 ticks
+```
+
+The script's own state is untouched by the calls, and it runs to completion normally. This is also the only moment JS code runs while a script executes: everything is synchronous, so nothing else gets a turn until the script finishes or an entry fires.
+
+A handler may call into the VM, register or remove entries, request a stop, or free the VM. It may **not** start a nested `run()` or `resume()`; those throw.
+
+### Capping memory
+
+The counterpart to bounding time. `0`, the default, means unlimited.
+
+```js
+vm.setMemoryLimit(vm.memoryUsed() + 1024 * 1024);   // +1 MiB
+
+try {
+    vm.run(`var hoard = []
+var i = 0
+while (true) { push(hoard, [i, i])
+ i = i + 1 }`);
+} catch (e) {
+    if (e.cause === CAUSE.MEMORY_LIMIT) {
+        console.log("hit the ceiling wanting", e.bytesWanted, "more bytes");
+    }
+}
+```
+
+```
+hit the ceiling wanting 64 more bytes
+```
+
+Crossing the ceiling does not fail the allocation, it suspends afterwards, so the VM is consistent and you decide what happens: grant more room with another `setMemoryLimit`, or discard it. Raising the limit above current usage clears the condition on its own. Garbage is never charged against the budget, only what the script retains.
+
+Size the limit relative to `vm.memoryUsed()` on a fresh VM rather than picking an absolute number, since a new VM already carries its own runtime footprint.
+
+### Stopping on demand
+
+```js
+vm.requestStop();       // sticky and unmaskable
+vm.stopRequested();     // true
+vm.clearStop();         // before reusing the VM
+```
+
+A stop outranks everything else and nothing in the script can suppress it. It is sticky by design: the VM stays suspended until you clear it.
+
+### Inspecting a stopped VM
+
+`vm.info()` is one snapshot, taken together so the fields cannot disagree.
+
+```js
+const i = vm.info();
+i.state === STATE.SUSPENDED;   // paused, frames intact
+i.cause === CAUSE.PREEMPT;     // why
+i.resumable;                   // would resume() get anywhere
+```
+
+`STATE` is what the VM *is*: `IDLE`, `RUNNING`, `SUSPENDED`, `FAILED`. `CAUSE` is why: `PREEMPT`, `HOST_STOP`, `MEMORY_LIMIT`, `OUT_OF_MEMORY`, `RUNTIME_ERROR`, and a few more.
+
+They are separate on purpose. Every pause looks the same as a state; the cause is what tells you whether to grant more time, grant more memory, or give up. A *failure* is `FAILED`, never `SUSPENDED`, so it can never be mistaken for something to continue.
+
+Read `resumable` rather than working it out yourself. A preemption leaves the VM immediately continuable; a stop and a memory ceiling are both sticky and read `false` until cleared. That single field is the difference between a loop that makes progress and one that spins.
+
+### Resuming
+
+```js
+vm.resume();
+```
+
+Continues a suspended VM, returning once the script completes, throwing `ZymSuspended` if it pauses again and `ZymError` if it fails. Whatever suspended it has to be cleared first, which is what `resumable` tells you.
+
+You rarely call it directly: an entry *with* a handler resumes for you, so slicing a long script into chunks and reporting progress is just a handler that returns `true`.
+
+```js
+const started = Date.now();
+let ticks = 0;
+
+vm.addPreempt(100_000, () => {
+    ticks++;
+    return Date.now() - started < 2000;        // false stops the run
+});
+
+vm.run(`var total = 0
+var i = 0
+while (i < 2000000) { total = total + i
+ i = i + 1 }
+func total_() { return total }`);
+
+console.log("finished after", ticks, "ticks, total =", vm.call("total_"));
+```
+
+```
+finished after 200 ticks, total = 1999999000000
+```
+
+Returning `false` from a handler stops instead of resuming, which is how you express a wall-clock deadline: the clock is only checked when a handler runs, so the granularity is your slice size.
 
 ---
 
@@ -503,6 +709,14 @@ Zym bytecode carries a magic header. Pre-1.0.0, the format version is held const
 ---
 
 ## Building from source
+
+The build sets the VM's limits above the core defaults, which are sized for microcontrollers: 4096 call frames, a 262144-slot value stack, and 32 preemption entries per VM. Each is a CMake cache variable, so a constrained target can dial them back without editing anything:
+
+```sh
+emcmake cmake -S . -B cmake-build-wasm -DZYM_FRAMES_MAX=256 -DZYM_PREEMPT_MAX_ENTRIES=8
+```
+
+Changing them needs a fresh configure; a plain rebuild reuses the cached definitions.
 
 Needs [Emscripten](https://emscripten.org/) on your PATH (`emsdk_env.sh`) plus CMake ≥ 3.20.
 
