@@ -41,6 +41,8 @@ JavaScript / WebAssembly bindings for the [Zym](https://github.com/zym-lang) scr
   - [Stopping on demand](#stopping-on-demand)
   - [Inspecting a stopped VM](#inspecting-a-stopped-vm)
   - [Resuming](#resuming)
+  - [Budgeting the entry table](#budgeting-the-entry-table)
+  - [Holding slots back from script](#holding-slots-back-from-script)
 - [Values](#values)
   - [`ZymValue` wrapper](#zymvalue-wrapper)
   - [`toJS()` decoding rules](#tojs-decoding-rules)
@@ -335,10 +337,21 @@ zym-js gives you three bounds, all of which **suspend** the VM rather than destr
 A preemption entry says "hand control back every N instructions". Slices count VM instructions, not milliseconds, so they are deterministic and machine-independent.
 
 ```js
-const id = vm.addPreempt(slice, handler?);
+const id = vm.addPreempt(slice, handler?, options?);
 vm.removePreempt(id);
 vm.setPreemptSlice(id, slice);   // retune its cadence
 ```
+
+Two options, both off by default:
+
+| | |
+| --- | --- |
+| `once` | retire after firing instead of rearming — a deadline rather than a repeating tick |
+| `maskable` | a script may suppress it with `Preempt.shield`; without this it always fires |
+
+`once` is the `addEventListener` sense of the word, and the entry frees its slot as it fires. Note that it stops bounding the run once it has gone off, so it is not a watchdog over unbounded code — for that you want a rearming entry, which is the default.
+
+Leaving `maskable` off is what makes a watchdog a watchdog: script cannot shield itself from it.
 
 Whether you pass a handler is the whole distinction:
 
@@ -493,6 +506,71 @@ finished after 200 ticks, total = 1999999000000
 ```
 
 Returning `false` from a handler stops instead of resuming, which is how you express a wall-clock deadline: the clock is only checked when a handler runs, so the granularity is your slice size.
+
+### Budgeting the entry table
+
+The table is shared: entries you register from JS and entries the script registers for itself with `Preempt.every` come out of the same 32 slots. `vm.preempts()` is one snapshot of it, taken together so the numbers cannot disagree.
+
+```js
+const t = vm.preempts();
+t.capacity          // 32, fixed at build time
+t.used / t.free     // used + free === capacity
+t.hostUsed          // registered through addPreempt
+t.scriptUsed        // registered by the script itself
+t.reserve           // slots held back from script
+t.scriptCapacity    // capacity - reserve
+t.scriptAvailable   // what script could still take right now
+t.entries           // [{ id, remaining, handler }, ...]
+```
+
+`remaining` counts instructions until that entry fires. `handler` is whether *this VM* has a JS function bound to that id, which is exactly the difference between an entry that resumes itself and one that suspends — so script-registered entries always read `false`.
+
+For a single entry, `vm.preemptRemaining(id)` answers the same question without building the array, which is what makes it usable from inside a handler retuning its own cadence. An unknown id reads `-1`, so it doubles as a liveness check.
+
+`vm.triggerPreempt(id)` arms an entry to fire at the next instruction instead of when its countdown runs out. Since nothing else in JS runs while a script does, this is not a way to interrupt from outside: use it from inside another entry's handler, or between `run()` and `resume()`.
+
+### Holding slots back from script
+
+A script that registers entries until the table is full leaves you unable to arm a watchdog over it. The reserve is the fix:
+
+```js
+vm.setPreemptReserve(2);   // 2 slots script can never take
+vm.preemptReserve();       // read it back
+```
+
+It is a floor for you and a ceiling for script — you are never restricted to the reserve, script simply cannot spend it. It also locks once the VM executes anything, which is what lets a script treat the budget it sees at the start as still bindable at the end. Calling it after the VM has run throws.
+
+```js
+const vm = await Zym.newVM();
+vm.setPreemptReserve(2);                      // keep 2 slots for the host
+
+vm.addPreempt(1_000_000);                     // spend one of them
+
+vm.run(`
+func tick() {}
+Preempt.every(250000, tick)
+`);
+
+const t = vm.preempts();
+console.log(`table  ${t.used}/${t.capacity} used, ${t.free} free`);
+console.log(`owners host ${t.hostUsed}, script ${t.scriptUsed}`);
+console.log(`script may still take ${t.scriptAvailable} of ${t.scriptCapacity}`);
+for (const e of t.entries) {
+    console.log(`  #${e.id} fires in ${e.remaining}, handler: ${e.handler}`);
+}
+```
+
+```
+table  2/32 used, 30 free
+owners host 1, script 1
+script may still take 29 of 30
+  #1 fires in 1000000, handler: false
+  #2 fires in 250000, handler: false
+```
+
+`scriptAvailable` is 29 rather than 30 because the script already spent one, and it is bounded by the real free slots as well as script's own budget — if you overspend your reserve, script's figure drops to match what actually exists rather than promising room that is gone. It is the same number the script reads from `Preempt.available()`, so host and script never disagree about how much is left.
+
+`preemptCapacity()`, `preemptUsed()` and `preemptReserve()` remain as direct single-value reads if you only want one of them.
 
 ---
 

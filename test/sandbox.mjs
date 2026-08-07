@@ -271,5 +271,176 @@ func beatCount() { return beats }
     vm.free();
 }
 
+// --- entry-table introspection ---------------------------------------------
+{
+    const vm = Zym.newVM();
+    const fresh = vm.preempts();
+    ok(fresh.capacity === 32, `capacity is the build's table size (${fresh.capacity})`);
+    ok(fresh.used === 0 && fresh.entries.length === 0, "a fresh VM holds no entries");
+    ok(fresh.used + fresh.free === fresh.capacity, "used + free == capacity");
+
+    vm.setPreemptReserve(4);
+    ok(vm.preempts().reserve === 4, "the reserve reads back");
+    ok(vm.preempts().scriptCapacity === 28, "scriptCapacity is capacity minus reserve");
+
+    const a = vm.addPreempt(500_000, () => {});
+    const b = vm.addPreempt(900_000);
+    const s = vm.preempts();
+    ok(s.used === 2, "both entries are counted");
+    ok(s.hostUsed === 2 && s.scriptUsed === 0, "host-registered entries are not script-owned");
+
+    const ea = s.entries.find(e => e.id === a);
+    const eb = s.entries.find(e => e.id === b);
+    ok(!!ea && !!eb, "every live id is enumerated");
+    ok(ea.remaining === 500_000, `countdown reports the slice (${ea.remaining})`);
+    ok(ea.handler === true && eb.handler === false,
+       "handler tells a self-resuming entry from a suspending one");
+
+    ok(vm.preemptRemaining(a) === 500_000, "preemptRemaining agrees with the snapshot");
+    ok(vm.preemptRemaining(0xdead) === -1, "an unknown id reads -1 rather than throwing");
+    ok(vm.triggerPreempt(a) === true, "a live entry can be armed to fire early");
+    ok(vm.triggerPreempt(0xdead) === false, "triggering an unknown id is false, not a throw");
+
+    vm.removePreempt(a); vm.removePreempt(b);
+    ok(vm.preempts().used === 0, "removing entries frees their slots");
+    vm.free();
+}
+
+// --- the host's view of script's budget matches what script sees ------------
+{
+    const vm = Zym.newVM();
+    vm.setPreemptReserve(4);
+    vm.addPreempt(1_000_000, () => {});
+
+    vm.run(`
+func tick() {}
+Preempt.every(300000, tick)
+Preempt.every(400000, tick)
+func avail() { return Preempt.available() }
+`);
+
+    const s = vm.preempts();
+    ok(s.used === 3, "host and script entries share one table");
+    ok(s.hostUsed === 1 && s.scriptUsed === 2, "ownership is split correctly");
+    ok(s.scriptAvailable === vm.call("avail"),
+       `host and script agree on the remaining script budget (${s.scriptAvailable})`);
+    ok(s.entries.filter(e => !e.handler).length === 2,
+       "script-owned entries carry no JS handler");
+    vm.free();
+}
+
+// --- the reserve is what keeps a slot arm-able after script has run ---------
+{
+    const vm = Zym.newVM();
+    vm.setPreemptReserve(2);
+    vm.run(`
+func tick() {}
+var n = 0
+while (Preempt.available() > 0) { Preempt.every(1000000 + n, tick)
+ n = n + 1 }
+func taken() { return Preempt.available() }
+`);
+    ok(vm.call("taken") === 0, "script exhausted its own budget");
+    const s = vm.preempts();
+    ok(s.scriptAvailable === 0, "the host sees script's budget is spent");
+    ok(s.free >= 2, `the reserve is still free for the host (${s.free})`);
+    let armed = true;
+    try { vm.addPreempt(50_000); } catch { armed = false; }
+    ok(armed, "the host can still arm a watchdog after script filled the table");
+    vm.free();
+}
+
+// --- setPreemptReserve is refused once the VM has executed ------------------
+{
+    const vm = Zym.newVM();
+    vm.run("var x = 1");
+    let refused = false;
+    try { vm.setPreemptReserve(4); } catch { refused = true; }
+    ok(refused, "the reserve locks once the VM has run, so script's budget is fixed");
+    vm.free();
+}
+
+// --- once: fire one time and retire ----------------------------------------
+const BOUNDED = "var i = 0\nwhile (i < 3000000) { i = i + 1 }";
+{
+    const vm = Zym.newVM();
+    let fired = 0;
+    vm.addPreempt(200_000, () => { fired++; }, { once: true });
+    vm.run(BOUNDED);
+    ok(fired === 1, `a one-shot entry fires exactly once (${fired})`);
+    ok(vm.preempts().used === 0, "a one-shot entry retires itself, freeing its slot");
+    vm.free();
+}
+{
+    const vm = Zym.newVM();
+    let fired = 0;
+    vm.addPreempt(200_000, () => { fired++; });
+    vm.run(BOUNDED);
+    ok(fired > 1, `the default entry rearms and keeps firing (${fired})`);
+    ok(vm.preempts().used === 1, "a rearming entry keeps its slot");
+    vm.free();
+}
+// Once it has fired, a one-shot entry no longer bounds anything -- so it is a
+// deadline, not a watchdog. Pair it with a rearming entry over unbounded code.
+{
+    const vm = Zym.newVM();
+    let oneshot = 0, guard = 0;
+    vm.addPreempt(100_000, () => { oneshot++; }, { once: true });
+    vm.addPreempt(400_000, () => { guard++; return guard < 5; });   // the real bound
+    try { vm.run(SPIN); } catch { /* stopped by the rearming entry */ }
+    ok(oneshot === 1, "the one-shot fired once and then stopped bounding the run");
+    ok(guard === 5, "the rearming entry is what actually stopped an endless script");
+    vm.free();
+}
+
+// --- maskable: a script shield may suppress it ------------------------------
+{
+    const SHIELDED = `
+func work() { var i = 0
+ while (i < 2000000) { i = i + 1 } }
+Preempt.shield(work)`;
+
+    const hard = Zym.newVM();
+    let hardFired = 0;
+    hard.addPreempt(100_000, () => { hardFired++; });
+    hard.run(SHIELDED);
+    ok(hardFired > 0, `an unmaskable entry fires through a script shield (${hardFired})`);
+    hard.free();
+
+    const soft = Zym.newVM();
+    let softFired = 0;
+    soft.addPreempt(100_000, () => { softFired++; }, { maskable: true });
+    soft.run(SHIELDED);
+    ok(softFired === 0, "a maskable entry is suppressed by a script shield");
+    soft.free();
+}
+
+// --- a handler held only by the entry table survives collection ------------
+// Regression: markRoots marked the legacy on_preempt_callback but never walked
+// vm->preempt_table, so an anonymous handler -- referred to by nothing else
+// once the registering function returned -- was collected mid-run and the
+// entry kept a dangling Value. Under wasm that trapped with "memory access
+// out of bounds"; natively the script died silently.
+{
+    const vm = Zym.newVM();
+    let ran = 0;
+    vm.registerNative("beat(n)", () => { ran++; return null; });
+    let trapped = null;
+    try {
+        vm.run(`
+func setup() { Preempt.every(400000, func() { beat(1) }) }
+setup()
+var junk = []
+var i = 0
+while (i < 400000) { junk = [i, i, i]
+ i = i + 1 }
+`);
+    } catch (e) { trapped = e; }
+    ok(trapped === null,
+       `an anonymous handler survives GC (${trapped ? trapped.message.split("\n")[0] : "no trap"})`);
+    ok(ran > 1, `it kept firing across collections (${ran}x)`);
+    vm.free();
+}
+
 console.log(`\n=== sandbox: ${passed} passed, ${failed} failed ===`);
 process.exit(failed === 0 ? 0 : 1);

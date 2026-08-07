@@ -212,7 +212,7 @@ void zjs_setDispatchError(ZymVM* vm, const char* message);
 
 // A preemption entry. Always registered callback-less: the VM hands control
 // back on expiry and the wrapper dispatches a JS handler if one was given.
-unsigned zjs_addPreempt(ZymVM* vm, int slice);
+unsigned zjs_addPreempt(ZymVM* vm, int slice, unsigned flags);
 int      zjs_removePreempt(ZymVM* vm, unsigned id);
 int      zjs_setPreemptSlice(ZymVM* vm, unsigned id, int slice);
 
@@ -244,6 +244,19 @@ int zjs_setPreemptReserve(ZymVM* vm, int slots);
 int zjs_preemptReserve(ZymVM* vm);
 int zjs_preemptCapacity(void);
 int zjs_preemptUsed(ZymVM* vm);
+
+// Rest of the entry-table introspection. `used` above counts every entry;
+// these split it by owner and report what is still takeable, so a host can
+// answer "can I still arm one?" without inferring it from the arithmetic.
+int zjs_preemptScriptUsed(ZymVM* vm);
+int zjs_preemptScriptCapacity(ZymVM* vm);
+int zjs_preemptScriptAvailable(ZymVM* vm);
+int zjs_preemptRemaining(ZymVM* vm, uint32_t id);
+int zjs_preemptTrigger(ZymVM* vm, uint32_t id);
+
+// Writes up to `max` live ids into `out` (a wasm heap pointer) and returns the
+// total number of live entries, which may exceed `max`.
+int zjs_preemptIds(ZymVM* vm, uint32_t* out, int max);
 
 void zjs_requestCancel(ZymVM* vm);
 void zjs_clearCancel(ZymVM* vm);

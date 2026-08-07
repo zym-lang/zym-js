@@ -867,10 +867,10 @@ void zjs_setDispatchError(ZymVM* vm, const char* message) {
    callback means "hand control back", which is exactly what lets the wrapper
    dispatch a JS handler and resume. Non-maskable, so a script shield cannot
    defer the host's own entries. */
-unsigned zjs_addPreempt(ZymVM* vm, int slice) {
+unsigned zjs_addPreempt(ZymVM* vm, int slice, unsigned flags) {
     if (!vm) return 0;
     if (slice < 1) slice = 1;
-    return (unsigned)zym_preemptRegister(vm, slice, zym_newNull(), 0);
+    return (unsigned)zym_preemptRegister(vm, slice, zym_newNull(), flags);
 }
 
 int zjs_removePreempt(ZymVM* vm, unsigned id) {
@@ -928,6 +928,20 @@ int zjs_setPreemptReserve(ZymVM* vm, int slots) {
 int zjs_preemptReserve(ZymVM* vm) { return vm ? zym_getHostPreemptReserve(vm) : 0; }
 int zjs_preemptCapacity(void)     { return zym_preemptCapacity(); }
 int zjs_preemptUsed(ZymVM* vm)    { return vm ? zym_preemptCount(vm, false) : 0; }
+
+int zjs_preemptScriptUsed(ZymVM* vm)      { return vm ? zym_preemptCount(vm, true) : 0; }
+int zjs_preemptScriptCapacity(ZymVM* vm)  { return vm ? zym_preemptScriptCapacity(vm) : 0; }
+int zjs_preemptScriptAvailable(ZymVM* vm) { return vm ? zym_preemptScriptAvailable(vm) : 0; }
+
+int zjs_preemptRemaining(ZymVM* vm, uint32_t id) {
+    return vm ? zym_preemptRemaining(vm, id) : -1;
+}
+int zjs_preemptTrigger(ZymVM* vm, uint32_t id) {
+    return (vm && zym_preemptTrigger(vm, id)) ? 1 : 0;
+}
+int zjs_preemptIds(ZymVM* vm, uint32_t* out, int max) {
+    return vm ? zym_preemptIds(vm, out, max) : 0;
+}
 
 void zjs_requestCancel(ZymVM* vm) { if (vm) zym_requestCancel(vm); }
 void zjs_clearCancel(ZymVM* vm)   { if (vm) zym_clearCancel(vm); }

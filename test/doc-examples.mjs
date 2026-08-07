@@ -97,3 +97,26 @@ console.log("--- 5 ---");
                 " resumable:", i.resumable);
     vm.free();
 }
+
+// ---- 6. budgeting the entry table -----------------------------------------
+console.log("--- 6 ---");
+{
+    const vm = await Zym.newVM();
+    vm.setPreemptReserve(2);                      // keep 2 slots for the host
+
+    vm.addPreempt(1_000_000);                     // spend one of them
+
+    vm.run(`
+func tick() {}
+Preempt.every(250000, tick)
+`);
+
+    const t = vm.preempts();
+    console.log(`table  ${t.used}/${t.capacity} used, ${t.free} free`);
+    console.log(`owners host ${t.hostUsed}, script ${t.scriptUsed}`);
+    console.log(`script may still take ${t.scriptAvailable} of ${t.scriptCapacity}`);
+    for (const e of t.entries) {
+        console.log(`  #${e.id} fires in ${e.remaining}, handler: ${e.handler}`);
+    }
+    vm.free();
+}

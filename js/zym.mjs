@@ -62,6 +62,10 @@ const CAUSE = Object.freeze({
     COMPILE_ERROR: 8,
 });
 
+// Preemption entry flags (zym_core/include/zym/zym.h).
+const PREEMPT_MASKABLE = 1 << 0;   // a script shield may suppress it
+const PREEMPT_ONESHOT  = 1 << 1;   // retire after firing instead of rearming
+
 // ZymDiagSeverity mirror (zym_core/include/zym/diagnostics.h).
 const SEVERITY = ["error", "warning", "info", "hint"];
 
@@ -600,13 +604,14 @@ class VM {
      *
      * Throws if the preemption table is full.
      */
-    addPreempt(slice, handler) {
+    addPreempt(slice, handler, { once = false, maskable = false } = {}) {
         this._checkAlive();
-        const id = this._M._zjs_addPreempt(this._ptr, slice | 0);
+        const flags = (maskable ? PREEMPT_MASKABLE : 0) | (once ? PREEMPT_ONESHOT : 0);
+        const id = this._M._zjs_addPreempt(this._ptr, slice | 0, flags);
         if (id === 0) throw new ZymError("addPreempt: no free preemption slots");
         if (typeof handler === "function") {
             if (!this._preempts) _hide(this, "_preempts", new Map());
-            this._preempts.set(id >>> 0, handler);
+            this._preempts.set(id >>> 0, { fn: handler, once: !!once });
         }
         return id >>> 0;
     }
@@ -634,8 +639,14 @@ class VM {
             if (this._M._zjs_vmCause(this._ptr) !== CAUSE.PREEMPT) return status;
 
             const id = this._M._zjs_causePreemptId(this._ptr) >>> 0;
-            const fn = this._preempts && this._preempts.get(id);
-            if (!fn) return status;          // no handler: hand it to the caller
+            const rec = this._preempts && this._preempts.get(id);
+            if (!rec) return status;         // no handler: hand it to the caller
+            const fn = rec.fn;
+
+            // A one-shot entry is retired by the VM as it fires, so drop our
+            // handler with it rather than holding the closure for an id that
+            // no longer exists -- and that a later register could reuse.
+            if (rec.once) this._preempts.delete(id);
 
             // Guard re-entry: a handler may call into the VM, but starting a
             // second run or resume from inside one is not something the single
@@ -705,6 +716,77 @@ class VM {
     preemptReserve()  { this._checkAlive(); return this._M._zjs_preemptReserve(this._ptr); }
     preemptCapacity() { this._checkAlive(); return this._M._zjs_preemptCapacity(); }
     preemptUsed()     { this._checkAlive(); return this._M._zjs_preemptUsed(this._ptr); }
+
+    /**
+     * Instructions left before entry `id` fires. -1 if the id is unknown, so
+     * this doubles as a liveness check. Allocates nothing, which is what makes
+     * it usable from inside a handler retuning its own cadence.
+     */
+    preemptRemaining(id) {
+        this._checkAlive();
+        return this._M._zjs_preemptRemaining(this._ptr, id >>> 0);
+    }
+
+    /**
+     * Arm entry `id` to fire at the next instruction rather than when its
+     * countdown runs out. False if the id is unknown.
+     *
+     * Nothing else in JS runs while a script does, so this is not a way to
+     * interrupt from outside -- use it from inside another entry's handler, or
+     * between run() and resume(), to make one fire early.
+     */
+    triggerPreempt(id) {
+        this._checkAlive();
+        return this._M._zjs_preemptTrigger(this._ptr, id >>> 0) !== 0;
+    }
+
+    /**
+     * One snapshot of the entry table, taken together so the numbers cannot
+     * disagree with each other -- the same shape as info() for VM state.
+     *
+     * `capacity` is the whole table, fixed at build time. `reserve` is what is
+     * held back from script, so `scriptCapacity` is what is left for it and
+     * `available` is what anyone could still take right now.
+     *
+     * `entries` lists the live ones with their countdowns; `handler` says
+     * whether this VM has a JS function bound to that id, which is the
+     * difference between an entry that resumes itself and one that suspends.
+     */
+    preempts() {
+        this._checkAlive();
+        const M = this._M, p = this._ptr;
+        const capacity = M._zjs_preemptCapacity();
+        const used     = M._zjs_preemptUsed(p);
+
+        const entries = [];
+        if (used > 0) {
+            const buf = M._malloc(used * 4);
+            try {
+                const n = Math.min(M._zjs_preemptIds(p, buf, used), used);
+                for (let i = 0; i < n; i++) {
+                    const id = M.HEAPU32[(buf >> 2) + i] >>> 0;
+                    entries.push({
+                        id,
+                        remaining: M._zjs_preemptRemaining(p, id),
+                        handler:   !!(this._preempts && this._preempts.has(id)),
+                    });
+                }
+            } finally { M._free(buf); }
+        }
+
+        const scriptUsed = M._zjs_preemptScriptUsed(p);
+        return {
+            capacity,
+            used,
+            free: capacity - used,
+            reserve:         M._zjs_preemptReserve(p),
+            scriptUsed,
+            hostUsed:        used - scriptUsed,
+            scriptCapacity:  M._zjs_preemptScriptCapacity(p),
+            scriptAvailable: M._zjs_preemptScriptAvailable(p),
+            entries,
+        };
+    }
 
     // -------------------------------------------------------------------
     // Bytecode
