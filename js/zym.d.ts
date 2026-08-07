@@ -246,12 +246,21 @@ export interface VM {
     // ---- sandbox controls -------------------------------------------------
 
     /**
-     * Abort once the VM executes `instructions` more instructions, rearming so
-     * each resume() grants another slice. Non-maskable: script cannot defer it.
+     * Add a preemption entry: every `slice` instructions the VM hands control
+     * back, rearming each time. Non-maskable, so script cannot defer it.
+     *
+     * With a handler, it runs and execution continues automatically -- an event
+     * pump into the script. The handler may call into the VM and the parked run
+     * survives it; returning `false` stops instead of resuming.
+     *
+     * Without a handler the VM stays suspended and `run()` throws
+     * ZymSuspended. That is the watchdog shape: the same entry, handler omitted.
+     *
      * Throws if the preemption table is full.
      */
-    setWatchdog(instructions: number): number;
-    clearWatchdog(id: number): boolean;
+    addPreempt(slice: number, handler?: (info: ZymVmInfo, id: number) => unknown): number;
+    removePreempt(id: number): boolean;
+    setPreemptSlice(id: number, slice: number): boolean;
 
     /** Stop at the next instruction. Unmaskable and sticky until clearStop(). */
     requestStop(): void;

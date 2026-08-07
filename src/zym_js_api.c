@@ -863,16 +863,25 @@ void zjs_setDispatchError(ZymVM* vm, const char* message) {
 /* Thin pass-throughs to the core. The policy lives there; this layer only
    adapts types for the JS boundary (size_t -> double, bool -> int). */
 
-unsigned zjs_setWatchdog(ZymVM* vm, int instructions) {
+/* Every entry registered from JS is callback-less at the C level: a null
+   callback means "hand control back", which is exactly what lets the wrapper
+   dispatch a JS handler and resume. Non-maskable, so a script shield cannot
+   defer the host's own entries. */
+unsigned zjs_addPreempt(ZymVM* vm, int slice) {
     if (!vm) return 0;
-    if (instructions < 1) instructions = 1;
-    /* Null callback = abort on expiry, and non-maskable, so a script shield
-       cannot defer it. That is the shape to supervise untrusted code with. */
-    return (unsigned)zym_preemptRegister(vm, instructions, zym_newNull(), 0);
+    if (slice < 1) slice = 1;
+    return (unsigned)zym_preemptRegister(vm, slice, zym_newNull(), 0);
 }
 
-int zjs_clearWatchdog(ZymVM* vm, unsigned id) {
+int zjs_removePreempt(ZymVM* vm, unsigned id) {
     return (vm && zym_preemptUnregister(vm, (ZymPreemptId)id)) ? 1 : 0;
+}
+
+/* Restart an entry's countdown, so a handler can retune its own cadence. */
+int zjs_setPreemptSlice(ZymVM* vm, unsigned id, int slice) {
+    if (!vm) return 0;
+    if (slice < 1) slice = 1;
+    return zym_preemptSetSlice(vm, (ZymPreemptId)id, slice) ? 1 : 0;
 }
 
 void zjs_requestStop(ZymVM* vm) { if (vm) zym_requestStop(vm); }

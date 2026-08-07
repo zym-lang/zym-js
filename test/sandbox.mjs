@@ -19,8 +19,8 @@ const TRIVIAL = "var x = 1 + 1";
 // --- a watchdog bounds how long it runs -----------------------------------
 {
     const vm = Zym.newVM();
-    const id = vm.setWatchdog(200000);
-    ok(id !== 0, "setWatchdog returns an id");
+    const id = vm.addPreempt(200000);   // no handler == watchdog
+    ok(id !== 0, "addPreempt returns an id");
 
     let caught = null;
     try { vm.run(SPIN); } catch (e) { caught = e; }
@@ -31,8 +31,8 @@ const TRIVIAL = "var x = 1 + 1";
     ok(caught.resumable, "a watchdog leaves it resumable");
     ok(vm.info().state === STATE.SUSPENDED, "state reads SUSPENDED");
 
-    ok(vm.clearWatchdog(id), "clearWatchdog removes it");
-    ok(!vm.clearWatchdog(id), "and is false the second time");
+    ok(vm.removePreempt(id), "removePreempt removes it");
+    ok(!vm.removePreempt(id), "and is false the second time");
     vm.free();
 }
 
@@ -79,7 +79,7 @@ const TRIVIAL = "var x = 1 + 1";
 // --- resuming in slices ----------------------------------------------------
 {
     const vm = Zym.newVM();
-    vm.setWatchdog(50000);
+    vm.addPreempt(50000);
 
     let slices = 0, done = false;
     try { vm.run("var t = 0\nvar i = 0\nwhile (i < 400000) { t = t + 1\n i = i + 1 }\nfunc get(){ return t }"); done = true; }
@@ -100,7 +100,7 @@ const TRIVIAL = "var x = 1 + 1";
 // --- an ordinary program is untouched --------------------------------------
 {
     const vm = Zym.newVM();
-    vm.setWatchdog(100000000);
+    vm.addPreempt(100000000);
     vm.setMemoryLimit(vm.memoryUsed() + 8 * 1024 * 1024);
     let threw = false;
     try { vm.run(TRIVIAL); } catch { threw = true; }
@@ -138,9 +138,9 @@ const TRIVIAL = "var x = 1 + 1";
     try { vm.setPreemptReserve(4); } catch { threw = true; }
     ok(threw, "and is refused afterwards, so a script budget cannot shift");
 
-    const id = vm.setWatchdog(1000000);
+    const id = vm.addPreempt(1000000);
     ok(vm.preemptUsed() >= 1, "preemptUsed counts live entries");
-    vm.clearWatchdog(id);
+    vm.removePreempt(id);
     vm.free();
 }
 
@@ -175,6 +175,99 @@ func none() { return 7 }
 
     const none = vm.getFunc("none");
     ok(none() === 7, "a zero-arg function round-trips");
+    vm.free();
+}
+
+// --- a handler turns an entry into an event pump ---------------------------
+{
+    const vm = Zym.newVM();
+    let ticks = 0;
+    const id = vm.addPreempt(50_000, () => { ticks++; });
+
+    vm.run("var t = 0\nvar i = 0\nwhile (i < 400000) { t = t + 1\n i = i + 1 }\nfunc get(){ return t }");
+
+    ok(ticks > 1, `a handler fires repeatedly and execution continues (${ticks})`);
+    ok(vm.call("get") === 400000, "and the script still completes correctly");
+    ok(vm.info().state === STATE.IDLE, "ending IDLE, with no suspension surfaced");
+    vm.removePreempt(id);
+    vm.free();
+}
+
+// --- the handler may call into the parked VM -------------------------------
+{
+    // The event-pump pattern: a script exposes a hook and the host drives it.
+    const vm = Zym.newVM();
+    let pumped = 0;
+    vm.addPreempt(50_000, () => { if (vm.call("onTick") === 1) pumped++; });
+
+    vm.run(`
+var beats = 0
+func onTick() { beats = beats + 1
+ return 1 }
+var t = 0
+var i = 0
+while (i < 400000) { t = t + 1
+ i = i + 1 }
+func total() { return t }
+func beatCount() { return beats }
+`);
+
+    ok(pumped > 1, `the handler called into the VM on each tick (${pumped})`);
+    ok(vm.call("beatCount") === pumped, "the script saw every tick");
+    ok(vm.call("total") === 400000, "and its own state was undisturbed");
+    vm.free();
+}
+
+// --- returning false stops instead of resuming -----------------------------
+{
+    const vm = Zym.newVM();
+    let ticks = 0;
+    vm.addPreempt(50_000, () => { ticks++; return ticks < 3; });
+
+    let caught = null;
+    try { vm.run(SPIN); } catch (e) { caught = e; }
+    ok(caught instanceof ZymSuspended, "returning false stops the run");
+    ok(ticks === 3, `after exactly the expected number of ticks (${ticks})`);
+    ok(caught.cause === CAUSE.PREEMPT, "reported as a preemption");
+    vm.free();
+}
+
+// --- an entry with no handler is still a watchdog --------------------------
+{
+    const vm = Zym.newVM();
+    vm.addPreempt(200_000);            // handler omitted
+    let caught = null;
+    try { vm.run(SPIN); } catch (e) { caught = e; }
+    ok(caught instanceof ZymSuspended, "a handler-less entry suspends, as before");
+    ok(caught.cause === CAUSE.PREEMPT, "with cause PREEMPT");
+    vm.free();
+}
+
+// --- two entries dispatch to their own handlers ----------------------------
+{
+    const vm = Zym.newVM();
+    let fast = 0, slow = 0;
+    const a = vm.addPreempt(40_000,  () => { fast++; });
+    const b = vm.addPreempt(150_000, () => { slow++; });
+
+    vm.run("var t = 0\nvar i = 0\nwhile (i < 400000) { t = t + 1\n i = i + 1 }");
+
+    ok(fast > 0 && slow > 0, `both entries fired (${fast} fast, ${slow} slow)`);
+    ok(fast > slow, "the shorter slice fired more often");
+    vm.removePreempt(a); vm.removePreempt(b);
+    vm.free();
+}
+
+// --- starting a run from inside a handler is refused ------------------------
+{
+    const vm = Zym.newVM();
+    let refused = false;
+    vm.addPreempt(50_000, () => {
+        try { vm.run("var x = 1"); } catch (e) { refused = true; }
+        return false;
+    });
+    try { vm.run(SPIN); } catch { /* stopped by the handler */ }
+    ok(refused, "a nested run() from a handler is refused rather than corrupting");
     vm.free();
 }
 

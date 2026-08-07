@@ -516,12 +516,16 @@ class VM {
      * left in the last global expression, or `undefined` if nothing.
      */
     run(source, opts) {
+        if (this._dispatching) {
+            throw new ZymError("run(): cannot start a run from inside a preempt handler");
+        }
         const chunk = this.compile(source, opts);
         this._releasePending();
         let suspended = false;
         try {
             this._drainErrors();
-            const status = this._M._zjs_runChunk(this._ptr, chunk._ptr);
+            let status = this._M._zjs_runChunk(this._ptr, chunk._ptr);
+            status = this._pumpPreempts(status);
             if (status === STATUS.SUSPENDED) {
                 // The VM is parked with its instruction pointer inside this
                 // chunk. Freeing it here would make resume() impossible, so
@@ -546,8 +550,12 @@ class VM {
      */
     resume() {
         this._checkAlive();
+        if (this._dispatching) {
+            throw new ZymError("resume(): already inside a preempt handler");
+        }
         this._drainErrors();
-        const status = this._M._zjs_resume(this._ptr);
+        let status = this._M._zjs_resume(this._ptr);
+        status = this._pumpPreempts(status);
         if (status === STATUS.SUSPENDED) this._throwSuspended("resume suspended");
         this._releasePending();
         if (status !== STATUS.OK) this._throwFromStatus(status, "resume failed");
@@ -576,20 +584,72 @@ class VM {
     // ---- sandbox controls -------------------------------------------------
 
     /**
-     * Abort the VM once it executes `instructions` more instructions, rearming
-     * each time so every resume() grants another slice. Non-maskable, so script
-     * cannot defer it. Returns an id for clearWatchdog.
+     * Add a preemption entry: every `slice` instructions the VM hands control
+     * back, rearming each time. Non-maskable, so script cannot defer it.
+     * Returns an id.
+     *
+     * With a handler, the handler runs and execution continues automatically,
+     * which makes an entry an event pump into the script: progress reporting,
+     * deadline checks, delivering a tick to a script-side hook. The handler may
+     * call into the VM (`vm.call(...)`) and the parked run survives it.
+     * Returning `false` stops instead of resuming.
+     *
+     * Without a handler there is nothing to run, so the VM stays suspended and
+     * `run()` throws ZymSuspended. That is the watchdog shape, and it is the
+     * same entry with the handler left out.
+     *
+     * Throws if the preemption table is full.
      */
-    setWatchdog(instructions) {
+    addPreempt(slice, handler) {
         this._checkAlive();
-        const id = this._M._zjs_setWatchdog(this._ptr, instructions | 0);
-        if (id === 0) throw new ZymError("setWatchdog: no free preemption slots");
+        const id = this._M._zjs_addPreempt(this._ptr, slice | 0);
+        if (id === 0) throw new ZymError("addPreempt: no free preemption slots");
+        if (typeof handler === "function") {
+            if (!this._preempts) _hide(this, "_preempts", new Map());
+            this._preempts.set(id >>> 0, handler);
+        }
         return id >>> 0;
     }
 
-    clearWatchdog(id) {
+    /** Remove an entry and forget its handler. False if the id is unknown. */
+    removePreempt(id) {
         this._checkAlive();
-        return this._M._zjs_clearWatchdog(this._ptr, id >>> 0) !== 0;
+        const key = id >>> 0;
+        if (this._preempts) this._preempts.delete(key);
+        return this._M._zjs_removePreempt(this._ptr, key) !== 0;
+    }
+
+    /** Restart an entry's countdown, so a handler can retune its own cadence. */
+    setPreemptSlice(id, slice) {
+        this._checkAlive();
+        return this._M._zjs_setPreemptSlice(this._ptr, id >>> 0, slice | 0) !== 0;
+    }
+
+    /**
+     * Dispatch handlers for entries that have one, resuming after each, until
+     * the VM finishes or suspends for something the caller has to decide about.
+     */
+    _pumpPreempts(status) {
+        while (status === STATUS.SUSPENDED) {
+            if (this._M._zjs_vmCause(this._ptr) !== CAUSE.PREEMPT) return status;
+
+            const id = this._M._zjs_causePreemptId(this._ptr) >>> 0;
+            const fn = this._preempts && this._preempts.get(id);
+            if (!fn) return status;          // no handler: hand it to the caller
+
+            // Guard re-entry: a handler may call into the VM, but starting a
+            // second run or resume from inside one is not something the single
+            // parked chunk can represent.
+            _hide(this, "_dispatching", true);
+            let keepGoing;
+            try { keepGoing = fn(this.info(), id); }
+            finally { _hide(this, "_dispatching", false); }
+
+            if (keepGoing === false) return status;   // handler asked to stop
+            if (this._freed) return status;           // handler freed the VM
+            status = this._M._zjs_resume(this._ptr);
+        }
+        return status;
     }
 
     /** Stop at the next instruction. Unmaskable and sticky until clearStop(). */

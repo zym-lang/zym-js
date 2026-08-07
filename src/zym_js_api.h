@@ -210,8 +210,11 @@ void zjs_setDispatchError(ZymVM* vm, const char* message);
 // Byte counts are returned as double: size_t is 32-bit under wasm, and a double
 // carries every value it can hold exactly while crossing to JS as a number.
 
-unsigned zjs_setWatchdog(ZymVM* vm, int instructions);
-int      zjs_clearWatchdog(ZymVM* vm, unsigned id);
+// A preemption entry. Always registered callback-less: the VM hands control
+// back on expiry and the wrapper dispatches a JS handler if one was given.
+unsigned zjs_addPreempt(ZymVM* vm, int slice);
+int      zjs_removePreempt(ZymVM* vm, unsigned id);
+int      zjs_setPreemptSlice(ZymVM* vm, unsigned id, int slice);
 
 void zjs_requestStop(ZymVM* vm);
 void zjs_clearStop(ZymVM* vm);

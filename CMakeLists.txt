@@ -10,6 +10,24 @@ set(CMAKE_C_STANDARD 11)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/zym_core
                  ${CMAKE_CURRENT_BINARY_DIR}/zym_core)
 
+# -----------------------------------------------------------------------------
+# VM limits. Matched to the desktop CLI rather than the MCU defaults: a browser
+# tab or a Node process has room, and the core's defaults (256 frames, 64K
+# stack, 8 preemption slots) are sized for constrained targets.
+#
+# Cost is bounded and paid per VM: frames are 32 bytes each (4096 -> 128 KB),
+# the value stack is dynamic and only grows toward its max, and a preemption
+# slot is 24 bytes (32 -> 768 B).
+# -----------------------------------------------------------------------------
+set(ZYM_FRAMES_MAX 4096 CACHE STRING "Max VM call frames (overrides FRAMES_MAX in zym_core/src/vm.h)")
+target_compile_definitions(zym_core PUBLIC FRAMES_MAX=${ZYM_FRAMES_MAX})
+
+set(ZYM_STACK_MAX 262144 CACHE STRING "Max VM value stack size (overrides STACK_MAX in zym_core/src/vm.h)")
+target_compile_definitions(zym_core PUBLIC STACK_MAX=${ZYM_STACK_MAX})
+
+set(ZYM_PREEMPT_MAX_ENTRIES 32 CACHE STRING "Preemption table slots per VM (overrides ZYM_PREEMPT_MAX_ENTRIES in zym_core/src/vm.h)")
+target_compile_definitions(zym_core PUBLIC ZYM_PREEMPT_MAX_ENTRIES=${ZYM_PREEMPT_MAX_ENTRIES})
+
 # zym_js: the wasm module that JS loads. main.c is a tiny smoke entry point
 # that also keeps a few handy runtime symbols exported; zym_js_api.c is the
 # real JS bridge.
@@ -60,8 +78,9 @@ set(ZJS_EXPORTED_FUNCS
     "_zjs_currentImportCaller"
     "_zjs_hasAnyFunction"
     "_zjs_canCallWith"
-    "_zjs_setWatchdog"
-    "_zjs_clearWatchdog"
+    "_zjs_addPreempt"
+    "_zjs_removePreempt"
+    "_zjs_setPreemptSlice"
     "_zjs_requestStop"
     "_zjs_clearStop"
     "_zjs_stopRequested"
