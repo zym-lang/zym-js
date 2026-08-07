@@ -26,6 +26,7 @@
   ],
   "scripts": {
     "build": "cmake --build cmake-build-wasm --target zym_js",
+    "prepack": "npm run build",
     "test": "npm run test:smoke && npm run test:regressions && npm run test:bytecode && npm run test:api && npm run test:modules && npm run test:sandbox && npm run test:docs",
     "test:smoke": "node test/node-smoke.mjs",
     "test:regressions": "node test/run-core-tests.mjs",

@@ -9,9 +9,9 @@
 
 ---
 
-> **⚠️ Alpha, `0.3.0-alpha.2`.** API, behavior, and bytecode format are not stable yet and may change between alphas. Do not use in production.
+> **`0.3.0`.** The JS API, native-signature grammar, and value marshaling are stable for this release.
 >
-> The vendored `zym_core` here is ahead of the public `0.2.0` release. Features like the unified variadic-fallback native signature aren't yet on [zym-lang.org](https://zym-lang.org). Stability lands with the final `0.3.0` release.
+> Bytecode is portable across builds of `0.3.0`, but the format changed since `0.2.0`: artifacts produced by earlier versions do not load.
 
 ---
 
@@ -213,7 +213,7 @@ Outputs `dist/zym_js.{mjs,wasm}`. The CMake profile is also registered in CLion 
 ## Documentation
 
 - **[doc.md](./doc.md)**: the full zym-js API reference (entry points, `VM` class, native registration, values, errors, memory, recipes, FAQ).
-- **[zym-lang.org](https://zym-lang.org)**: the language guide and core library docs. Note the public site currently tracks `0.2.0`; features in this repo that landed post-`0.2.0` (e.g. the variadic-fallback signature syntax) are documented here in-repo until the site catches up.
+- **[zym-lang.org](https://zym-lang.org)**: the language guide and core library docs.
 - **[Playground](https://zym-lang.org/playground.html)**: try Zym in the browser.
 
 ## Project structure
@@ -233,11 +233,10 @@ zym-js/
 
 ## Status
 
-`0.3.0` is the current in-development version. Until it's cut:
+`0.3.0` is the current release.
 
-- Bytecode emitted by this build is not version-checked against other builds. Do not persist bytecode produced by pre-release builds and expect long-term portability.
-- Public docs at [zym-lang.org](https://zym-lang.org) reflect `0.2.0`; this repo is ahead.
-- The native signature grammar in this repo includes the variadic-fallback form; scripts authored against it will not compile on `0.2.0`.
+- Bytecode is portable between builds of `0.3.0`. The format changed since `0.2.0`, so artifacts from earlier versions do not load — recompile from source.
+- The native signature grammar includes the variadic-fallback form; scripts authored against it will not compile on `0.2.0`.
 - Preemption is exposed from JS as of this release; see [Sandboxing](./doc.md#sandboxing). Everything is synchronous — there is no async surface, and no JS runs while a script does except a preemption handler.
 
 ## License
