@@ -9,13 +9,7 @@
 
 ---
 
-> **`0.3.0`.** The JS API, native-signature grammar, and value marshaling are stable for this release.
->
-> Bytecode is portable across builds of `0.3.0`, but the format changed since `0.2.0`: artifacts produced by earlier versions do not load.
-
----
-
-If you've used Zym from C, this is the same VM, same bytecode, same semantics, just reachable from `import`.
+If you've used Zym from C, this is the same VM, same bytecode, same semantics, just reachable from `import`. It is also what runs the [playground](https://zym-lang.org/playground.html) on zym-lang.org, so the language you try in the browser is this package.
 
 ```js
 import Zym from "@zym-lang/zym-js";
@@ -214,7 +208,7 @@ Outputs `dist/zym_js.{mjs,wasm}`. The CMake profile is also registered in CLion 
 
 - **[doc.md](./doc.md)**: the full zym-js API reference (entry points, `VM` class, native registration, values, errors, memory, recipes, FAQ).
 - **[zym-lang.org](https://zym-lang.org)**: the language guide and core library docs.
-- **[Playground](https://zym-lang.org/playground.html)**: try Zym in the browser.
+- **[Playground](https://zym-lang.org/playground.html)**: try Zym in the browser — it runs on this package.
 
 ## Project structure
 
@@ -231,13 +225,12 @@ zym-js/
 └── package.json
 ```
 
-## Status
+## Compatibility
 
-`0.3.0` is the current release.
-
-- Bytecode is portable between builds of `0.3.0`. The format changed since `0.2.0`, so artifacts from earlier versions do not load — recompile from source.
-- The native signature grammar includes the variadic-fallback form; scripts authored against it will not compile on `0.2.0`.
-- Preemption is exposed from JS as of this release; see [Sandboxing](./doc.md#sandboxing). Everything is synchronous — there is no async surface, and no JS runs while a script does except a preemption handler.
+- **Same VM as native Zym.** The bundled `zym_core` is the language itself, not a reimplementation, so semantics and bytecode match the CLI and any C embedding of the same version.
+- **Bytecode is portable between builds of a given version**, and the format is versioned: an artifact from a different major format is rejected rather than misread. Recompile from source when moving across versions.
+- **Everything is synchronous.** There is no async surface, and no JS runs while a script does — except a preemption handler, which is the one place the host gets a turn mid-execution. See [Sandboxing](./doc.md#sandboxing).
+- **No special headers or flags.** No `SharedArrayBuffer`, no cross-origin isolation, no threads. It runs wherever plain wasm runs.
 
 ## License
 
