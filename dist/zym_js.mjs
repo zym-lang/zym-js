@@ -561,6 +561,9 @@ function createWasm() {
     
     updateMemoryViews();
 
+    wasmTable = wasmExports['__indirect_function_table'];
+    
+
     addOnInit(wasmExports['__wasm_call_ctors']);
 
     removeRunDependency('wasm-instantiate');
@@ -783,6 +786,10 @@ function zjs_js_on_error(vm_ptr,type,file,line,msg) { if (typeof Module.__zjs_on
     };
 
   var __emscripten_memcpy_js = (dest, src, num) => HEAPU8.copyWithin(dest, src, src + num);
+
+  var __emscripten_throw_longjmp = () => {
+      throw Infinity;
+    };
 
   var getHeapMax = () =>
       // Stay one Wasm page short of 4GB: while e.g. Chrome is able to allocate
@@ -1009,6 +1016,19 @@ function zjs_js_on_error(vm_ptr,type,file,line,msg) { if (typeof Module.__zjs_on
       quit_(1, e);
     };
 
+  var wasmTableMirror = [];
+  
+  /** @type {WebAssembly.Table} */
+  var wasmTable;
+  var getWasmTableEntry = (funcPtr) => {
+      var func = wasmTableMirror[funcPtr];
+      if (!func) {
+        if (funcPtr >= wasmTableMirror.length) wasmTableMirror.length = funcPtr + 1;
+        wasmTableMirror[funcPtr] = func = wasmTable.get(funcPtr);
+      }
+      return func;
+    };
+
   var getCFunc = (ident) => {
       var func = Module['_' + ident]; // closure exported function
       return func;
@@ -1189,6 +1209,8 @@ var wasmImports = {
   /** @export */
   _emscripten_memcpy_js: __emscripten_memcpy_js,
   /** @export */
+  _emscripten_throw_longjmp: __emscripten_throw_longjmp,
+  /** @export */
   emscripten_resize_heap: _emscripten_resize_heap,
   /** @export */
   environ_get: _environ_get,
@@ -1204,6 +1226,20 @@ var wasmImports = {
   fd_seek: _fd_seek,
   /** @export */
   fd_write: _fd_write,
+  /** @export */
+  invoke_ii,
+  /** @export */
+  invoke_iii,
+  /** @export */
+  invoke_iiii,
+  /** @export */
+  invoke_iiiii,
+  /** @export */
+  invoke_iiiiiiii,
+  /** @export */
+  invoke_vi,
+  /** @export */
+  invoke_viii,
   /** @export */
   zjs_js_dispatch,
   /** @export */
@@ -1262,6 +1298,26 @@ var _zjs_callFunction = Module['_zjs_callFunction'] = (a0, a1, a2, a3, a4) => (_
 var _malloc = Module['_malloc'] = (a0) => (_malloc = Module['_malloc'] = wasmExports['malloc'])(a0);
 var _zjs_callValue = Module['_zjs_callValue'] = (a0, a1, a2, a3, a4) => (_zjs_callValue = Module['_zjs_callValue'] = wasmExports['zjs_callValue'])(a0, a1, a2, a3, a4);
 var _zjs_setDispatchError = Module['_zjs_setDispatchError'] = (a0, a1) => (_zjs_setDispatchError = Module['_zjs_setDispatchError'] = wasmExports['zjs_setDispatchError'])(a0, a1);
+var _zjs_setWatchdog = Module['_zjs_setWatchdog'] = (a0, a1) => (_zjs_setWatchdog = Module['_zjs_setWatchdog'] = wasmExports['zjs_setWatchdog'])(a0, a1);
+var _zjs_clearWatchdog = Module['_zjs_clearWatchdog'] = (a0, a1) => (_zjs_clearWatchdog = Module['_zjs_clearWatchdog'] = wasmExports['zjs_clearWatchdog'])(a0, a1);
+var _zjs_requestStop = Module['_zjs_requestStop'] = (a0) => (_zjs_requestStop = Module['_zjs_requestStop'] = wasmExports['zjs_requestStop'])(a0);
+var _zjs_clearStop = Module['_zjs_clearStop'] = (a0) => (_zjs_clearStop = Module['_zjs_clearStop'] = wasmExports['zjs_clearStop'])(a0);
+var _zjs_stopRequested = Module['_zjs_stopRequested'] = (a0) => (_zjs_stopRequested = Module['_zjs_stopRequested'] = wasmExports['zjs_stopRequested'])(a0);
+var _zjs_resume = Module['_zjs_resume'] = (a0) => (_zjs_resume = Module['_zjs_resume'] = wasmExports['zjs_resume'])(a0);
+var _zjs_setMemoryLimit = Module['_zjs_setMemoryLimit'] = (a0, a1) => (_zjs_setMemoryLimit = Module['_zjs_setMemoryLimit'] = wasmExports['zjs_setMemoryLimit'])(a0, a1);
+var _zjs_memoryLimit = Module['_zjs_memoryLimit'] = (a0) => (_zjs_memoryLimit = Module['_zjs_memoryLimit'] = wasmExports['zjs_memoryLimit'])(a0);
+var _zjs_memoryUsed = Module['_zjs_memoryUsed'] = (a0) => (_zjs_memoryUsed = Module['_zjs_memoryUsed'] = wasmExports['zjs_memoryUsed'])(a0);
+var _zjs_oomPending = Module['_zjs_oomPending'] = (a0) => (_zjs_oomPending = Module['_zjs_oomPending'] = wasmExports['zjs_oomPending'])(a0);
+var _zjs_clearOom = Module['_zjs_clearOom'] = (a0) => (_zjs_clearOom = Module['_zjs_clearOom'] = wasmExports['zjs_clearOom'])(a0);
+var _zjs_vmState = Module['_zjs_vmState'] = (a0) => (_zjs_vmState = Module['_zjs_vmState'] = wasmExports['zjs_vmState'])(a0);
+var _zjs_vmCause = Module['_zjs_vmCause'] = (a0) => (_zjs_vmCause = Module['_zjs_vmCause'] = wasmExports['zjs_vmCause'])(a0);
+var _zjs_vmResumable = Module['_zjs_vmResumable'] = (a0) => (_zjs_vmResumable = Module['_zjs_vmResumable'] = wasmExports['zjs_vmResumable'])(a0);
+var _zjs_causePreemptId = Module['_zjs_causePreemptId'] = (a0) => (_zjs_causePreemptId = Module['_zjs_causePreemptId'] = wasmExports['zjs_causePreemptId'])(a0);
+var _zjs_causeBytesWanted = Module['_zjs_causeBytesWanted'] = (a0) => (_zjs_causeBytesWanted = Module['_zjs_causeBytesWanted'] = wasmExports['zjs_causeBytesWanted'])(a0);
+var _zjs_setPreemptReserve = Module['_zjs_setPreemptReserve'] = (a0, a1) => (_zjs_setPreemptReserve = Module['_zjs_setPreemptReserve'] = wasmExports['zjs_setPreemptReserve'])(a0, a1);
+var _zjs_preemptReserve = Module['_zjs_preemptReserve'] = (a0) => (_zjs_preemptReserve = Module['_zjs_preemptReserve'] = wasmExports['zjs_preemptReserve'])(a0);
+var _zjs_preemptCapacity = Module['_zjs_preemptCapacity'] = () => (_zjs_preemptCapacity = Module['_zjs_preemptCapacity'] = wasmExports['zjs_preemptCapacity'])();
+var _zjs_preemptUsed = Module['_zjs_preemptUsed'] = (a0) => (_zjs_preemptUsed = Module['_zjs_preemptUsed'] = wasmExports['zjs_preemptUsed'])(a0);
 var _zjs_requestCancel = Module['_zjs_requestCancel'] = (a0) => (_zjs_requestCancel = Module['_zjs_requestCancel'] = wasmExports['zjs_requestCancel'])(a0);
 var _zjs_clearCancel = Module['_zjs_clearCancel'] = (a0) => (_zjs_clearCancel = Module['_zjs_clearCancel'] = wasmExports['zjs_clearCancel'])(a0);
 var _zjs_wasCancelled = Module['_zjs_wasCancelled'] = (a0) => (_zjs_wasCancelled = Module['_zjs_wasCancelled'] = wasmExports['zjs_wasCancelled'])(a0);
@@ -1272,6 +1328,8 @@ var _zjs_diagnosticCode = Module['_zjs_diagnosticCode'] = (a0, a1) => (_zjs_diag
 var _zjs_diagnosticHint = Module['_zjs_diagnosticHint'] = (a0, a1) => (_zjs_diagnosticHint = Module['_zjs_diagnosticHint'] = wasmExports['zjs_diagnosticHint'])(a0, a1);
 var _zjs_clearDiagnostics = Module['_zjs_clearDiagnostics'] = (a0) => (_zjs_clearDiagnostics = Module['_zjs_clearDiagnostics'] = wasmExports['zjs_clearDiagnostics'])(a0);
 var _zjs_hasFunction = Module['_zjs_hasFunction'] = (a0, a1, a2) => (_zjs_hasFunction = Module['_zjs_hasFunction'] = wasmExports['zjs_hasFunction'])(a0, a1, a2);
+var _zjs_hasAnyFunction = Module['_zjs_hasAnyFunction'] = (a0, a1) => (_zjs_hasAnyFunction = Module['_zjs_hasAnyFunction'] = wasmExports['zjs_hasAnyFunction'])(a0, a1);
+var _zjs_canCallWith = Module['_zjs_canCallWith'] = (a0, a1, a2) => (_zjs_canCallWith = Module['_zjs_canCallWith'] = wasmExports['zjs_canCallWith'])(a0, a1, a2);
 var _zjs_disassembleChunk = Module['_zjs_disassembleChunk'] = (a0, a1, a2) => (_zjs_disassembleChunk = Module['_zjs_disassembleChunk'] = wasmExports['zjs_disassembleChunk'])(a0, a1, a2);
 var _zjs_freeString = Module['_zjs_freeString'] = (a0) => (_zjs_freeString = Module['_zjs_freeString'] = wasmExports['zjs_freeString'])(a0);
 var _zjs_compileWithModules = Module['_zjs_compileWithModules'] = (a0, a1, a2, a3, a4, a5, a6) => (_zjs_compileWithModules = Module['_zjs_compileWithModules'] = wasmExports['zjs_compileWithModules'])(a0, a1, a2, a3, a4, a5, a6);
@@ -1279,6 +1337,7 @@ var _zjs_currentImportDepth = Module['_zjs_currentImportDepth'] = (a0) => (_zjs_
 var _zjs_currentImportPathAt = Module['_zjs_currentImportPathAt'] = (a0, a1) => (_zjs_currentImportPathAt = Module['_zjs_currentImportPathAt'] = wasmExports['zjs_currentImportPathAt'])(a0, a1);
 var _zjs_currentImportCaller = Module['_zjs_currentImportCaller'] = (a0) => (_zjs_currentImportCaller = Module['_zjs_currentImportCaller'] = wasmExports['zjs_currentImportCaller'])(a0);
 var _zjs_version = Module['_zjs_version'] = () => (_zjs_version = Module['_zjs_version'] = wasmExports['zjs_version'])();
+var _setThrew = (a0, a1) => (_setThrew = wasmExports['setThrew'])(a0, a1);
 var __emscripten_tempret_set = (a0) => (__emscripten_tempret_set = wasmExports['_emscripten_tempret_set'])(a0);
 var __emscripten_tempret_get = () => (__emscripten_tempret_get = wasmExports['_emscripten_tempret_get'])();
 var __emscripten_stack_restore = (a0) => (__emscripten_stack_restore = wasmExports['_emscripten_stack_restore'])(a0);
@@ -1310,6 +1369,83 @@ var dynCall_jijjjjjjjjjjj = Module['dynCall_jijjjjjjjjjjj'] = (a0, a1, a2, a3, a
 var dynCall_jiii = Module['dynCall_jiii'] = (a0, a1, a2, a3) => (dynCall_jiii = Module['dynCall_jiii'] = wasmExports['dynCall_jiii'])(a0, a1, a2, a3);
 var dynCall_jiiii = Module['dynCall_jiiii'] = (a0, a1, a2, a3, a4) => (dynCall_jiiii = Module['dynCall_jiiii'] = wasmExports['dynCall_jiiii'])(a0, a1, a2, a3, a4);
 var dynCall_jiji = Module['dynCall_jiji'] = (a0, a1, a2, a3, a4) => (dynCall_jiji = Module['dynCall_jiji'] = wasmExports['dynCall_jiji'])(a0, a1, a2, a3, a4);
+
+function invoke_iiiii(index,a1,a2,a3,a4) {
+  var sp = stackSave();
+  try {
+    return getWasmTableEntry(index)(a1,a2,a3,a4);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiiiiiii(index,a1,a2,a3,a4,a5,a6,a7) {
+  var sp = stackSave();
+  try {
+    return getWasmTableEntry(index)(a1,a2,a3,a4,a5,a6,a7);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_vi(index,a1) {
+  var sp = stackSave();
+  try {
+    getWasmTableEntry(index)(a1);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iii(index,a1,a2) {
+  var sp = stackSave();
+  try {
+    return getWasmTableEntry(index)(a1,a2);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_ii(index,a1) {
+  var sp = stackSave();
+  try {
+    return getWasmTableEntry(index)(a1);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiii(index,a1,a2,a3) {
+  var sp = stackSave();
+  try {
+    return getWasmTableEntry(index)(a1,a2,a3);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_viii(index,a1,a2,a3) {
+  var sp = stackSave();
+  try {
+    getWasmTableEntry(index)(a1,a2,a3);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
 
 
 // include: postamble.js

@@ -4,6 +4,22 @@
  */
 
 export type ZymStatusCode = 0 | 1 | 2 | 3 | 100;
+export type ZymStateCode  = 0 | 1 | 2 | 3;
+export type ZymCauseCode  = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+/** One snapshot of a VM: what it is, why, and whether resume() would help. */
+export interface ZymVmInfo {
+    state: ZymStateCode;
+    cause: ZymCauseCode;
+    /** True when resume() would make progress: suspended, with nothing sticky pending. */
+    resumable: boolean;
+    /** Which preemption entry fired. Meaningful for the preemption causes. */
+    preemptId: number;
+    /** The allocation that crossed the ceiling. Meaningful for MEMORY_LIMIT. */
+    bytesWanted: number;
+    memoryUsed: number;
+    memoryLimit: number;
+}
 export type ZymKindCode   = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 255;
 
 export interface ZymErrorDetail {
@@ -14,6 +30,22 @@ export interface ZymErrorDetail {
 }
 
 /** Thrown from VM operations on compile / runtime / bridge failure. */
+/**
+ * Thrown when a VM pauses rather than fails: a watchdog fired, a stop was
+ * requested, or the memory ceiling was crossed. Distinct from ZymError so
+ * "I stopped it" is never confused with "it failed on its own".
+ */
+export class ZymSuspended extends ZymError {
+    readonly name: "ZymSuspended";
+    readonly cause: ZymCauseCode;
+    readonly state: ZymStateCode;
+    readonly resumable: boolean;
+    readonly preemptId: number;
+    readonly bytesWanted: number;
+    readonly memoryUsed: number;
+    readonly memoryLimit: number;
+}
+
 export class ZymError extends Error {
     name: "ZymError";
     status: ZymStatusCode;
@@ -192,6 +224,70 @@ export interface VM {
     /** True if a function with this name and arity is callable. */
     hasFunction(name: string, arity: number): boolean;
 
+    /**
+     * Existence probe. With one argument, true if any callable by that name
+     * exists at any arity, fixed or variadic. With two, true if a call with
+     * exactly `arity` arguments would dispatch, which includes a variadic whose
+     * fixed prefix is short enough.
+     *
+     * Prefer this to `hasFunction` for entry-point discovery: the strict
+     * exact-slot match misses a variadic `main(...args)`.
+     */
+    hasFunc(name: string, arity?: number): boolean;
+
+    /**
+     * A reusable callable bound to a script function, or null if none exists.
+     * Equivalent to `vm.call(name, ...args)` with the name resolved once.
+     * Identity-stable: the same name returns the same function object, so it
+     * can be a Map key or compared by reference.
+     */
+    getFunc(name: string): ((...args: Marshalable[]) => unknown) | null;
+
+    // ---- sandbox controls -------------------------------------------------
+
+    /**
+     * Abort once the VM executes `instructions` more instructions, rearming so
+     * each resume() grants another slice. Non-maskable: script cannot defer it.
+     * Throws if the preemption table is full.
+     */
+    setWatchdog(instructions: number): number;
+    clearWatchdog(id: number): boolean;
+
+    /** Stop at the next instruction. Unmaskable and sticky until clearStop(). */
+    requestStop(): void;
+    clearStop(): void;
+    stopRequested(): boolean;
+
+    /**
+     * Continue a suspended VM. Returns once the script completes, throws
+     * ZymSuspended if it pauses again, ZymError if it fails.
+     */
+    resume(): void;
+
+    /**
+     * Cap how much this VM may allocate; 0 (the default) is unlimited.
+     * Crossing it suspends rather than failing the allocation. Raising the
+     * limit above current usage clears the condition on its own.
+     */
+    setMemoryLimit(bytes: number): void;
+    memoryLimit(): number;
+    memoryUsed(): number;
+    oomPending(): boolean;
+    clearOom(): void;
+
+    /** What the VM is, why, and whether it can be resumed. */
+    info(): ZymVmInfo;
+
+    /**
+     * Hold preemption slots back from script so a watchdog can still be armed
+     * after it has been running. Must be called before the VM executes;
+     * throws afterwards.
+     */
+    setPreemptReserve(slots: number): void;
+    preemptReserve(): number;
+    preemptCapacity(): number;
+    preemptUsed(): number;
+
     /** Human-readable disassembly of a chunk. */
     disassemble(chunk: Chunk, name?: string): string;
 
@@ -283,6 +379,21 @@ export const KIND: Readonly<{
 }>;
 
 /** Status-code tags mirrored from src/zym_js_api.h (advanced use). */
+export const STATE: Readonly<{
+    IDLE: 0; RUNNING: 1; SUSPENDED: 2; FAILED: 3;
+}>;
+
+/**
+ * Why a VM stopped. Every pause reports STATUS.SUSPENDED because it is one VM
+ * state; the cause is what says whether to grant more time, more memory, or
+ * give up. New reasons are added here, so existing branches keep their meaning.
+ */
+export const CAUSE: Readonly<{
+    NONE: 0; SCRIPT_YIELD: 1; PREEMPT: 2; PREEMPT_BLOCKED: 3;
+    HOST_STOP: 4; MEMORY_LIMIT: 5; OUT_OF_MEMORY: 6;
+    RUNTIME_ERROR: 7; COMPILE_ERROR: 8;
+}>;
+
 export const STATUS: Readonly<{
-    OK: 0; COMPILE_ERROR: 1; RUNTIME_ERROR: 2; YIELD: 3; BRIDGE_ERROR: 100;
+    OK: 0; COMPILE_ERROR: 1; RUNTIME_ERROR: 2; SUSPENDED: 3; BRIDGE_ERROR: 100;
 }>;

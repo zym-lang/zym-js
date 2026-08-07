@@ -38,7 +38,28 @@ const KIND = Object.freeze({
 });
 
 const STATUS = Object.freeze({
-    OK: 0, COMPILE_ERROR: 1, RUNTIME_ERROR: 2, YIELD: 3, BRIDGE_ERROR: 100,
+    OK: 0, COMPILE_ERROR: 1, RUNTIME_ERROR: 2, SUSPENDED: 3, BRIDGE_ERROR: 100,
+});
+
+// What a VM *is*, as opposed to what one call returned.
+const STATE = Object.freeze({
+    IDLE: 0, RUNNING: 1, SUSPENDED: 2, FAILED: 3,
+});
+
+// Why it is there. Every pause reports STATUS.SUSPENDED because it is one VM
+// state; the cause is what tells you whether to grant more time, more memory,
+// or give up. New reasons to stop are added here rather than to STATE or
+// STATUS, so existing branches keep meaning what they meant.
+const CAUSE = Object.freeze({
+    NONE: 0,
+    SCRIPT_YIELD: 1,       // reserved: the language has no cooperative yield yet
+    PREEMPT: 2,            // a watchdog or preemption entry expired
+    PREEMPT_BLOCKED: 3,    // a preempt callback could not be run
+    HOST_STOP: 4,          // requestStop()
+    MEMORY_LIMIT: 5,       // the memory ceiling was crossed
+    OUT_OF_MEMORY: 6,      // the allocator itself failed; not resumable
+    RUNTIME_ERROR: 7,
+    COMPILE_ERROR: 8,
 });
 
 // ZymDiagSeverity mirror (zym_core/include/zym/diagnostics.h).
@@ -55,6 +76,27 @@ export class ZymError extends Error {
         this.name = "ZymError";
         this.status = status;
         this.details = details;
+    }
+}
+
+/**
+ * Thrown when a VM pauses rather than fails: a watchdog fired, a stop was
+ * requested, or the memory ceiling was crossed. The VM is intact and usually
+ * resumable -- check `resumable` -- so this is a decision point, not a
+ * breakage. Kept distinct from ZymError so "I stopped it" and "it failed on its
+ * own" never get confused.
+ */
+export class ZymSuspended extends ZymError {
+    constructor(message, info) {
+        super(message, { status: STATUS.SUSPENDED });
+        this.name = "ZymSuspended";
+        this.cause = info.cause;
+        this.state = info.state;
+        this.resumable = info.resumable;
+        this.preemptId = info.preemptId;
+        this.bytesWanted = info.bytesWanted;
+        this.memoryUsed = info.memoryUsed;
+        this.memoryLimit = info.memoryLimit;
     }
 }
 
@@ -475,14 +517,134 @@ class VM {
      */
     run(source, opts) {
         const chunk = this.compile(source, opts);
+        this._releasePending();
+        let suspended = false;
         try {
             this._drainErrors();
             const status = this._M._zjs_runChunk(this._ptr, chunk._ptr);
+            if (status === STATUS.SUSPENDED) {
+                // The VM is parked with its instruction pointer inside this
+                // chunk. Freeing it here would make resume() impossible, so
+                // hold it until the run finishes or another one supersedes it.
+                suspended = true;
+                this._pendingChunk = chunk;
+                this._throwSuspended("run suspended");
+            }
             if (status !== STATUS.OK) this._throwFromStatus(status, "run failed");
         } finally {
-            chunk.free();
+            if (!suspended) chunk.free();
         }
     }
+
+    /**
+     * Continue a suspended VM. Returns normally once the script completes,
+     * throws ZymSuspended if it pauses again, and throws ZymError if it fails.
+     *
+     * Whatever suspended it must be cleared first: a watchdog needs no action
+     * (each resume grants a fresh slice), but a stop needs clearStop() and a
+     * memory ceiling needs room. `info().resumable` folds that together.
+     */
+    resume() {
+        this._checkAlive();
+        this._drainErrors();
+        const status = this._M._zjs_resume(this._ptr);
+        if (status === STATUS.SUSPENDED) this._throwSuspended("resume suspended");
+        this._releasePending();
+        if (status !== STATUS.OK) this._throwFromStatus(status, "resume failed");
+    }
+
+    /** Drop a chunk held for a suspension that is no longer being resumed. */
+    _releasePending() {
+        if (this._pendingChunk) {
+            const c = this._pendingChunk;
+            this._pendingChunk = null;
+            c.free();
+        }
+    }
+
+    _throwSuspended(what) {
+        const i = this.info();
+        const why = {
+            [CAUSE.PREEMPT]:         "execution budget exhausted",
+            [CAUSE.PREEMPT_BLOCKED]: "a preemption callback could not be run",
+            [CAUSE.HOST_STOP]:       "stop requested",
+            [CAUSE.MEMORY_LIMIT]:    "memory ceiling reached",
+        }[i.cause] || "suspended";
+        throw new ZymSuspended(`${what}: ${why}`, i);
+    }
+
+    // ---- sandbox controls -------------------------------------------------
+
+    /**
+     * Abort the VM once it executes `instructions` more instructions, rearming
+     * each time so every resume() grants another slice. Non-maskable, so script
+     * cannot defer it. Returns an id for clearWatchdog.
+     */
+    setWatchdog(instructions) {
+        this._checkAlive();
+        const id = this._M._zjs_setWatchdog(this._ptr, instructions | 0);
+        if (id === 0) throw new ZymError("setWatchdog: no free preemption slots");
+        return id >>> 0;
+    }
+
+    clearWatchdog(id) {
+        this._checkAlive();
+        return this._M._zjs_clearWatchdog(this._ptr, id >>> 0) !== 0;
+    }
+
+    /** Stop at the next instruction. Unmaskable and sticky until clearStop(). */
+    requestStop()   { this._checkAlive(); this._M._zjs_requestStop(this._ptr); }
+    clearStop()     { this._checkAlive(); this._M._zjs_clearStop(this._ptr); }
+    stopRequested() { this._checkAlive(); return this._M._zjs_stopRequested(this._ptr) !== 0; }
+
+    /**
+     * Cap how much this VM may allocate. 0 means unlimited, the default.
+     * Crossing it suspends rather than failing the allocation, so you choose
+     * whether to grant more, free memory, or discard the VM. Raising the limit
+     * above current usage clears the condition on its own.
+     */
+    setMemoryLimit(bytes) {
+        this._checkAlive();
+        this._M._zjs_setMemoryLimit(this._ptr, Number(bytes) || 0);
+    }
+    memoryLimit() { this._checkAlive(); return this._M._zjs_memoryLimit(this._ptr); }
+    memoryUsed()  { this._checkAlive(); return this._M._zjs_memoryUsed(this._ptr); }
+    oomPending()  { this._checkAlive(); return this._M._zjs_oomPending(this._ptr) !== 0; }
+    clearOom()    { this._checkAlive(); this._M._zjs_clearOom(this._ptr); }
+
+    /**
+     * One snapshot of the VM: what it is, why, and whether resume() would get
+     * anywhere. Taken together so the fields cannot disagree with each other.
+     */
+    info() {
+        this._checkAlive();
+        const M = this._M;
+        return {
+            state:       M._zjs_vmState(this._ptr),
+            cause:       M._zjs_vmCause(this._ptr),
+            resumable:   M._zjs_vmResumable(this._ptr) !== 0,
+            preemptId:   M._zjs_causePreemptId(this._ptr) >>> 0,
+            bytesWanted: M._zjs_causeBytesWanted(this._ptr),
+            memoryUsed:  M._zjs_memoryUsed(this._ptr),
+            memoryLimit: M._zjs_memoryLimit(this._ptr),
+        };
+    }
+
+    /**
+     * Hold `slots` preemption entries back from script so you can still arm a
+     * watchdog after it has been running. Must be called before the VM executes
+     * anything: that is what lets a script treat its budget as fixed.
+     */
+    setPreemptReserve(slots) {
+        this._checkAlive();
+        if (this._M._zjs_setPreemptReserve(this._ptr, slots | 0) === 0) {
+            throw new ZymError(
+                "setPreemptReserve: out of range, or the VM has already executed");
+        }
+    }
+    preemptReserve()  { this._checkAlive(); return this._M._zjs_preemptReserve(this._ptr); }
+    preemptCapacity() { this._checkAlive(); return this._M._zjs_preemptCapacity(); }
+    preemptUsed()     { this._checkAlive(); return this._M._zjs_preemptUsed(this._ptr); }
 
     // -------------------------------------------------------------------
     // Bytecode
@@ -649,6 +811,52 @@ class VM {
         } finally {
             M._free(namePtr);
         }
+    }
+
+    /**
+     * Existence probe. With one argument, true if *any* callable by that name
+     * exists at any arity, fixed or variadic. With two, true if a call with
+     * exactly `arity` arguments would dispatch, which includes a variadic whose
+     * fixed prefix is short enough.
+     *
+     * Use this for entry-point discovery -- `if (vm.hasFunc("main"))` -- where
+     * hasFunction's exact-slot match would miss a variadic `main(...args)`.
+     */
+    hasFunc(name, arity) {
+        this._checkAlive();
+        const M = this._M;
+        const namePtr = _strToWasm(M, name);
+        try {
+            return arity === undefined
+                ? M._zjs_hasAnyFunction(this._ptr, namePtr) !== 0
+                : M._zjs_canCallWith(this._ptr, namePtr, arity | 0) !== 0;
+        } finally {
+            M._free(namePtr);
+        }
+    }
+
+    /**
+     * A reusable callable bound to a script function, or null if no function by
+     * that name exists. Calling it is equivalent to `vm.call(name, ...args)`,
+     * but the name is resolved once and the result can be passed around like an
+     * ordinary JS function.
+     *
+     * Identity-stable: the same name returns the same function object every
+     * time, so it can be used as a Map key or compared by reference.
+     */
+    getFunc(name) {
+        this._checkAlive();
+        if (!this.hasFunc(name)) return null;
+
+        if (!this._funcCache) _hide(this, "_funcCache", new Map());
+        const hit = this._funcCache.get(name);
+        if (hit) return hit;
+
+        const vm = this;
+        const fn = (...args) => vm.call(name, ...args);
+        Object.defineProperty(fn, "name", { value: name, configurable: true });
+        this._funcCache.set(name, fn);
+        return fn;
     }
 
     /**
@@ -1158,4 +1366,4 @@ function _strToWasm(M, s) {
 // ---------------------------------------------------------------------------
 // Re-exports so advanced users can access the tag dictionaries.
 // ---------------------------------------------------------------------------
-export { ZymValue, KIND, STATUS, Zym };
+export { ZymValue, KIND, STATUS, STATE, CAUSE, Zym };

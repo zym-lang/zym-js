@@ -857,6 +857,69 @@ void zjs_setDispatchError(ZymVM* vm, const char* message) {
    tab; the caller polls zjs_wasCancelled() to tell a cancellation apart
    from a genuine error, then clears the flag before reusing the VM. */
 
+/* -------------------------------------------------------------------------- */
+/* Sandbox controls                                                           */
+/* -------------------------------------------------------------------------- */
+/* Thin pass-throughs to the core. The policy lives there; this layer only
+   adapts types for the JS boundary (size_t -> double, bool -> int). */
+
+unsigned zjs_setWatchdog(ZymVM* vm, int instructions) {
+    if (!vm) return 0;
+    if (instructions < 1) instructions = 1;
+    /* Null callback = abort on expiry, and non-maskable, so a script shield
+       cannot defer it. That is the shape to supervise untrusted code with. */
+    return (unsigned)zym_preemptRegister(vm, instructions, zym_newNull(), 0);
+}
+
+int zjs_clearWatchdog(ZymVM* vm, unsigned id) {
+    return (vm && zym_preemptUnregister(vm, (ZymPreemptId)id)) ? 1 : 0;
+}
+
+void zjs_requestStop(ZymVM* vm) { if (vm) zym_requestStop(vm); }
+void zjs_clearStop(ZymVM* vm)   { if (vm) zym_clearStop(vm); }
+int  zjs_stopRequested(ZymVM* vm) { return (vm && zym_stopRequested(vm)) ? 1 : 0; }
+
+int zjs_resume(ZymVM* vm) {
+    if (!vm) return (int)ZYM_STATUS_RUNTIME_ERROR;
+    return (int)zym_resume(vm);
+}
+
+void zjs_setMemoryLimit(ZymVM* vm, double bytes) {
+    if (!vm) return;
+    if (bytes < 0) bytes = 0;
+    zym_setMemoryLimit(vm, (size_t)bytes);
+}
+double zjs_memoryLimit(ZymVM* vm) { return vm ? (double)zym_getMemoryLimit(vm) : 0; }
+double zjs_memoryUsed(ZymVM* vm)  { return vm ? (double)zym_memoryUsed(vm) : 0; }
+int    zjs_oomPending(ZymVM* vm)  { return (vm && zym_oomPending(vm)) ? 1 : 0; }
+void   zjs_clearOom(ZymVM* vm)    { if (vm) zym_clearOom(vm); }
+
+int zjs_vmState(ZymVM* vm) { return vm ? (int)zym_vmState(vm) : 0; }
+int zjs_vmCause(ZymVM* vm) { return vm ? (int)zym_vmCause(vm) : 0; }
+
+int zjs_vmResumable(ZymVM* vm) {
+    if (!vm) return 0;
+    ZymVmInfo i; zym_vmInfo(vm, &i);
+    return i.resumable ? 1 : 0;
+}
+unsigned zjs_causePreemptId(ZymVM* vm) {
+    if (!vm) return 0;
+    ZymVmInfo i; zym_vmInfo(vm, &i);
+    return (unsigned)i.preempt_id;
+}
+double zjs_causeBytesWanted(ZymVM* vm) {
+    if (!vm) return 0;
+    ZymVmInfo i; zym_vmInfo(vm, &i);
+    return (double)i.bytes_wanted;
+}
+
+int zjs_setPreemptReserve(ZymVM* vm, int slots) {
+    return (vm && zym_setHostPreemptReserve(vm, slots)) ? 1 : 0;
+}
+int zjs_preemptReserve(ZymVM* vm) { return vm ? zym_getHostPreemptReserve(vm) : 0; }
+int zjs_preemptCapacity(void)     { return zym_preemptCapacity(); }
+int zjs_preemptUsed(ZymVM* vm)    { return vm ? zym_preemptCount(vm, false) : 0; }
+
 void zjs_requestCancel(ZymVM* vm) { if (vm) zym_requestCancel(vm); }
 void zjs_clearCancel(ZymVM* vm)   { if (vm) zym_clearCancel(vm); }
 int  zjs_wasCancelled(ZymVM* vm)  { return (vm && zym_wasCancelled(vm)) ? 1 : 0; }
@@ -940,6 +1003,20 @@ void zjs_clearDiagnostics(ZymVM* vm) { if (vm) zymClearDiagnostics(vm); }
 int zjs_hasFunction(ZymVM* vm, const char* name, int arity) {
     if (!vm || !name) return 0;
     return zym_hasFunction(vm, name, arity) ? 1 : 0;
+}
+
+/* Looser probes than zjs_hasFunction, which demands an exact fixed-arity slot.
+   These answer the questions a caller actually has: does anything by this name
+   exist, and would a call with this many arguments dispatch (counting variadics
+   whose fixed prefix is short enough). */
+int zjs_hasAnyFunction(ZymVM* vm, const char* name) {
+    if (!vm || !name) return 0;
+    return zym_hasAnyFunction(vm, name) ? 1 : 0;
+}
+
+int zjs_canCallWith(ZymVM* vm, const char* name, int argc) {
+    if (!vm || !name) return 0;
+    return zym_canCallWith(vm, name, argc) ? 1 : 0;
 }
 
 /* -------------------------------------------------------------------------- */

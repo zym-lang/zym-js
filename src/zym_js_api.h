@@ -198,6 +198,50 @@ void zjs_setDispatchError(ZymVM* vm, const char* message);
 // Interrupt a compile or run from outside the VM. Poll zjs_wasCancelled()
 // to distinguish a cancellation from a genuine error, then clear the flag
 // before reusing the VM.
+// --------------------------------------------------------------------------
+// Sandbox controls
+// --------------------------------------------------------------------------
+// The same guarantees the CLI's `Zym` native gives a parent script: a host can
+// always take control back from code it is running. A watchdog bounds how long
+// a script runs, a memory ceiling bounds how much it allocates, and a stop ends
+// it outright. All three suspend rather than unwind, so the VM stays intact and
+// zjs_resume continues it.
+//
+// Byte counts are returned as double: size_t is 32-bit under wasm, and a double
+// carries every value it can hold exactly while crossing to JS as a number.
+
+unsigned zjs_setWatchdog(ZymVM* vm, int instructions);
+int      zjs_clearWatchdog(ZymVM* vm, unsigned id);
+
+void zjs_requestStop(ZymVM* vm);
+void zjs_clearStop(ZymVM* vm);
+int  zjs_stopRequested(ZymVM* vm);
+
+// Continues a suspended VM. Returns a ZymStatus; SUSPENDED means it stopped
+// again, and zjs_vmCause says why.
+int zjs_resume(ZymVM* vm);
+
+void   zjs_setMemoryLimit(ZymVM* vm, double bytes);
+double zjs_memoryLimit(ZymVM* vm);
+double zjs_memoryUsed(ZymVM* vm);
+int    zjs_oomPending(ZymVM* vm);
+void   zjs_clearOom(ZymVM* vm);
+
+// What the VM is and why. State and cause are separate axes: state says whether
+// execution can continue, cause says what put it there.
+int    zjs_vmState(ZymVM* vm);
+int    zjs_vmCause(ZymVM* vm);
+int    zjs_vmResumable(ZymVM* vm);
+unsigned zjs_causePreemptId(ZymVM* vm);
+double zjs_causeBytesWanted(ZymVM* vm);
+
+// Holds preemption slots back from script. Settable only before the VM has
+// executed, so a script's budget cannot shift underneath it.
+int zjs_setPreemptReserve(ZymVM* vm, int slots);
+int zjs_preemptReserve(ZymVM* vm);
+int zjs_preemptCapacity(void);
+int zjs_preemptUsed(ZymVM* vm);
+
 void zjs_requestCancel(ZymVM* vm);
 void zjs_clearCancel(ZymVM* vm);
 int  zjs_wasCancelled(ZymVM* vm);
@@ -223,6 +267,11 @@ void        zjs_clearDiagnostics(ZymVM* vm);
 // -----------------------------------------------------------------------------
 // Function probing
 // -----------------------------------------------------------------------------
+// Existence probe with no arity constraint, and a dispatchability probe that
+// accounts for variadics. zjs_hasFunction is the strict exact-slot version.
+int zjs_hasAnyFunction(ZymVM* vm, const char* name);
+int zjs_canCallWith(ZymVM* vm, const char* name, int argc);
+
 int zjs_hasFunction(ZymVM* vm, const char* name, int arity);
 
 // -----------------------------------------------------------------------------
