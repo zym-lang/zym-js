@@ -1469,10 +1469,23 @@ class Chunk {
         _hide(this, "_cleanup", cleanup);
         _chunkFinalizer.register(this, cleanup, this);
     }
+    /**
+     * Run this chunk. Same contract as `vm.run()`: handlers are dispatched,
+     * a suspension throws ZymSuspended, and a failure throws ZymError.
+     *
+     * Nothing is parked on suspension the way `vm.run()` parks its chunk --
+     * you own this one, so it stays alive as long as your reference does, and
+     * `vm.resume()` continues into it.
+     */
     run() {
         this._vm._checkAlive();
+        if (this._vm._dispatching) {
+            throw new ZymError("run(): cannot start a run from inside a preempt handler");
+        }
         this._vm._drainErrors();
-        const status = this._vm._M._zjs_runChunk(this._vm._ptr, this._ptr);
+        let status = this._vm._M._zjs_runChunk(this._vm._ptr, this._ptr);
+        status = this._vm._pumpPreempts(status);
+        if (status === STATUS.SUSPENDED) this._vm._throwSuspended("run suspended");
         if (status !== STATUS.OK) this._vm._throwFromStatus(status, "run failed");
     }
     free() {

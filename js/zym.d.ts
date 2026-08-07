@@ -1,6 +1,12 @@
+/// <reference lib="esnext.disposable" />
 /*
  * TypeScript definitions for the zym-js bridge. The implementation lives in
  * zym.mjs; these are the types users consume.
+ *
+ * The lib reference above is load-bearing: several types here declare
+ * [Symbol.dispose], which is not in the default lib for targets below esnext.
+ * Without it, consumers on a normal `target: es2022` config get four errors
+ * out of this file rather than from anything they wrote. Needs TypeScript 5.2+.
  */
 
 export type ZymStatusCode = 0 | 1 | 2 | 3 | 100;
@@ -20,6 +26,47 @@ export interface ZymVmInfo {
     memoryUsed: number;
     memoryLimit: number;
 }
+/** Options for a preemption entry. Both default to false. */
+export interface ZymPreemptOptions {
+    /**
+     * Retire after firing instead of rearming -- a deadline, not a repeating
+     * tick. It stops bounding the run once it has gone off, so it is not a
+     * watchdog over unbounded code.
+     */
+    once?: boolean;
+    /** Let a script suppress it with `Preempt.shield`. Off is what makes a watchdog one. */
+    maskable?: boolean;
+}
+
+/** One live preemption entry. */
+export interface ZymPreemptEntry {
+    id: number;
+    /** Instructions until it fires. */
+    remaining: number;
+    /** Whether this VM has a JS handler bound to it; script-owned entries read false. */
+    handler: boolean;
+}
+
+/** One snapshot of the preemption entry table. */
+export interface ZymPreemptTable {
+    /** The whole table, fixed at build time. */
+    capacity: number;
+    used: number;
+    /** capacity - used. */
+    free: number;
+    /** Slots held back from script. */
+    reserve: number;
+    /** Entries the script registered for itself. */
+    scriptUsed: number;
+    /** Entries registered through addPreempt(). */
+    hostUsed: number;
+    /** capacity - reserve. */
+    scriptCapacity: number;
+    /** What script could still take right now, bounded by real free slots too. */
+    scriptAvailable: number;
+    entries: ZymPreemptEntry[];
+}
+
 export type ZymKindCode   = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 255;
 
 export interface ZymErrorDetail {
@@ -47,7 +94,13 @@ export class ZymSuspended extends ZymError {
 }
 
 export class ZymError extends Error {
-    name: "ZymError";
+    /**
+     * Widened to the union because ZymSuspended is a ZymError, so a value typed
+     * as ZymError really can carry either name at runtime. Narrowing it to just
+     * "ZymError" here made the subclass's own declaration illegal, which meant
+     * these typings did not compile. Still usable as a discriminant.
+     */
+    readonly name: "ZymError" | "ZymSuspended";
     status: ZymStatusCode;
     details: ZymErrorDetail[];
 }
@@ -258,9 +311,29 @@ export interface VM {
      *
      * Throws if the preemption table is full.
      */
-    addPreempt(slice: number, handler?: (info: ZymVmInfo, id: number) => unknown): number;
+    addPreempt(
+        slice: number,
+        handler?: (info: ZymVmInfo, id: number) => unknown,
+        options?: ZymPreemptOptions,
+    ): number;
     removePreempt(id: number): boolean;
     setPreemptSlice(id: number, slice: number): boolean;
+
+    /**
+     * Instructions until entry `id` fires, or -1 if the id is unknown -- so it
+     * doubles as a liveness check. Allocates nothing, unlike `preempts()`.
+     */
+    preemptRemaining(id: number): number;
+
+    /**
+     * Arm entry `id` to fire at the next instruction rather than when its
+     * countdown runs out. False if the id is unknown.
+     *
+     * Nothing else in JS runs while a script does, so this cannot interrupt
+     * from outside: use it from inside another handler, or between run() and
+     * resume().
+     */
+    triggerPreempt(id: number): boolean;
 
     /** Stop at the next instruction. Unmaskable and sticky until clearStop(). */
     requestStop(): void;
@@ -296,6 +369,12 @@ export interface VM {
     preemptReserve(): number;
     preemptCapacity(): number;
     preemptUsed(): number;
+
+    /**
+     * One snapshot of the entry table, taken together so the numbers cannot
+     * disagree with each other -- the same idea as `info()` for VM state.
+     */
+    preempts(): ZymPreemptTable;
 
     /** Human-readable disassembly of a chunk. */
     disassemble(chunk: Chunk, name?: string): string;

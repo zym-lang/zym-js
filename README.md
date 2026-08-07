@@ -134,8 +134,22 @@ const vm  = zym.newVM();
 | `vm.defineGlobal(name, value)` | Expose a JS value (auto-marshaled) as a Zym global. |
 | `vm.registerNative(sig, fn)` | Register a JS function as a Zym native. |
 | `vm.call(name, ...args)` | Call a Zym script function from JS. |
+| `vm.hasFunc(name, arity?)` / `vm.getFunc(name)` | Find out whether a script defines something before calling it. |
 | `vm.on("error", cb)` | Stream VM errors (compile and runtime) to a listener. |
 | `vm.free()` | Explicitly release VM memory. Optional; a `FinalizationRegistry` will clean up forgotten VMs. |
+
+Bounding untrusted code — all of these **suspend** the VM rather than destroy it, so you can inspect and continue:
+
+| Surface | What it does |
+|---|---|
+| `vm.addPreempt(slice, handler?, opts?)` | Hand control back every `slice` instructions. With a handler it resumes automatically; without one the run suspends. |
+| `vm.removePreempt(id)` / `vm.setPreemptSlice(id, slice)` | Drop an entry, or retune its cadence. |
+| `vm.setMemoryLimit(bytes)` | Cap how much the VM may allocate. Crossing it suspends instead of failing the allocation. |
+| `vm.requestStop()` / `vm.clearStop()` | Unmaskable, sticky stop. |
+| `vm.info()` | One snapshot: what the VM is, why, and whether `resume()` would get anywhere. |
+| `vm.resume()` | Continue a suspended VM. |
+| `vm.preempts()` | One snapshot of the entry table: capacity, ownership split, and what script may still take. |
+| `vm.setPreemptReserve(n)` | Hold slots back so a watchdog can still be armed after script has been running. |
 
 Full details, signature grammar, marshaling rules, memory semantics, error handling, and recipes are in **[doc.md](./doc.md)**.
 
@@ -224,7 +238,7 @@ zym-js/
 - Bytecode emitted by this build is not version-checked against other builds. Do not persist bytecode produced by pre-release builds and expect long-term portability.
 - Public docs at [zym-lang.org](https://zym-lang.org) reflect `0.2.0`; this repo is ahead.
 - The native signature grammar in this repo includes the variadic-fallback form; scripts authored against it will not compile on `0.2.0`.
-- Async / preemption exposure from JS is deliberately deferred until `zym_core`'s host preemption/continuation model is finalized.
+- Preemption is exposed from JS as of this release; see [Sandboxing](./doc.md#sandboxing). Everything is synchronous — there is no async surface, and no JS runs while a script does except a preemption handler.
 
 ## License
 

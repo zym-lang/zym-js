@@ -120,3 +120,30 @@ Preempt.every(250000, tick)
     }
     vm.free();
 }
+
+// ---- 7. bounds and host calls ---------------------------------------------
+console.log("--- 7 ---");
+{
+    const DEF = `func work() { var i = 0
+ while (i < 5000000) { i = i + 1 }
+ return i }`;
+
+    // Work that run() is executing can be paused.
+    const a = await Zym.newVM();
+    a.addPreempt(200_000);
+    try { a.run(DEF + "\nwork()"); } catch (e) {
+        console.log("run():  suspended:", e instanceof ZymSuspended,
+                    " resumable:", a.info().resumable);
+    }
+    a.free();
+
+    // The same work reached through a host call cannot be paused.
+    const b = await Zym.newVM();
+    b.run(DEF);
+    b.addPreempt(200_000);
+    try { b.call("work"); } catch (e) {
+        console.log("call(): suspended:", e instanceof ZymSuspended,
+                    " resumable:", b.info().resumable);
+    }
+    b.free();
+}

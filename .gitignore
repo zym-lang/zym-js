@@ -29,3 +29,4 @@ compile_commands.json
 .DS_Store
 Thumbs.db
 *.tgz
+/node_modules/

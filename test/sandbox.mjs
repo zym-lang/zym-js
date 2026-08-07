@@ -15,6 +15,7 @@ const Zym = await createZym();
 const SPIN    = "var i = 0\nwhile (true) { i = i + 1 }";
 const GLUTTON = "var h = []\nvar i = 0\nwhile (true) { push(h, [i, i])\n i = i + 1 }";
 const TRIVIAL = "var x = 1 + 1";
+const SPIN_BOUNDED = "var i = 0\nwhile (i < 3000000) { i = i + 1 }";
 
 // --- a watchdog bounds how long it runs -----------------------------------
 {
@@ -439,6 +440,61 @@ while (i < 400000) { junk = [i, i, i]
     ok(trapped === null,
        `an anonymous handler survives GC (${trapped ? trapped.message.split("\n")[0] : "no trap"})`);
     ok(ran > 1, `it kept firing across collections (${ran}x)`);
+    vm.free();
+}
+
+// --- chunk.run() reports and pumps like vm.run() ---------------------------
+// Regression: Chunk.run() funnelled every non-OK status through
+// _throwFromStatus, so a suspension arrived as a plain ZymError even though
+// the VM was parked and resumable, and it never dispatched handlers at all.
+{
+    const vm = Zym.newVM();
+    const c = vm.compile(SPIN);
+    vm.addPreempt(200_000);
+    let err = null;
+    try { c.run(); } catch (e) { err = e; }
+    ok(err instanceof ZymSuspended,
+       `chunk.run() surfaces a suspension as ZymSuspended (${err && err.constructor.name})`);
+    ok(err.cause === CAUSE.PREEMPT, "with the preempt cause on the error");
+    ok(vm.info().resumable, "and leaves the VM genuinely resumable");
+    vm.free();
+}
+{
+    // it resumes into the chunk and finishes
+    const vm = Zym.newVM();
+    const c = vm.compile("var n = 0\nwhile (n < 300000) { n = n + 1 }\nfunc total() { return n }");
+    vm.addPreempt(200_000);
+    let done = false, rounds = 0;
+    try { c.run(); done = true; } catch (e) { if (!(e instanceof ZymSuspended)) throw e; }
+    while (!done && rounds < 500) {
+        rounds++;
+        try { vm.resume(); done = true; } catch (e) { if (!(e instanceof ZymSuspended)) throw e; }
+    }
+    ok(done, `a chunk.run() suspension resumes to completion (${rounds} rounds)`);
+    ok(vm.call("total") === 300000, "and the script finished its work");
+    vm.free();
+}
+{
+    // handlers pump for chunk.run(), same as vm.run()
+    const vm = Zym.newVM();
+    const c = vm.compile(SPIN_BOUNDED);
+    let ticks = 0;
+    vm.addPreempt(200_000, () => { ticks++; });
+    c.run();
+    ok(ticks > 1, `chunk.run() dispatches preempt handlers (${ticks} ticks)`);
+    vm.free();
+}
+{
+    // and a nested chunk.run() from inside a handler is refused
+    const vm = Zym.newVM();
+    const c = vm.compile(SPIN);
+    let refused = false;
+    vm.addPreempt(200_000, () => {
+        try { vm.compile("var z = 1").run(); } catch { refused = true; }
+        return false;
+    });
+    try { c.run(); } catch { /* stopped by the handler */ }
+    ok(refused, "a nested chunk.run() from a handler is refused, like vm.run()");
     vm.free();
 }
 

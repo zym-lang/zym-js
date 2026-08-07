@@ -41,6 +41,7 @@ JavaScript / WebAssembly bindings for the [Zym](https://github.com/zym-lang) scr
   - [Stopping on demand](#stopping-on-demand)
   - [Inspecting a stopped VM](#inspecting-a-stopped-vm)
   - [Resuming](#resuming)
+  - [What can and cannot be paused](#what-can-and-cannot-be-paused)
   - [Budgeting the entry table](#budgeting-the-entry-table)
   - [Holding slots back from script](#holding-slots-back-from-script)
 - [Values](#values)
@@ -506,6 +507,66 @@ finished after 200 ticks, total = 1999999000000
 ```
 
 Returning `false` from a handler stops instead of resuming, which is how you express a wall-clock deadline: the clock is only checked when a handler runs, so the granularity is your slice size.
+
+### What can and cannot be paused
+
+**A bound can only pause work that `run()` is executing.** Everything else it can only stop.
+
+This is the one rule in this section that will bite you, because the same script, the same watchdog, and the same runaway loop behave differently depending on how you reached the code:
+
+| | |
+| --- | --- |
+| `vm.run(src)` and `chunk.run()` | the VM **suspends** — inspect it, then `resume()` |
+| `vm.call(name, ...)` | the VM is **terminated** — nothing to resume |
+| a callable from `vm.getFunc(name)` | the VM is **terminated** |
+| anything you call from inside a registered native | the VM is **terminated** |
+
+```js
+const DEF = `func work() { var i = 0
+ while (i < 5000000) { i = i + 1 }
+ return i }`;
+
+// Work that run() is executing can be paused.
+const a = await Zym.newVM();
+a.addPreempt(200_000);
+try { a.run(DEF + "\nwork()"); } catch (e) {
+    console.log("run():  suspended:", e instanceof ZymSuspended,
+                " resumable:", a.info().resumable);
+}
+
+// The same work reached through a host call cannot be paused.
+const b = await Zym.newVM();
+b.run(DEF);
+b.addPreempt(200_000);
+try { b.call("work"); } catch (e) {
+    console.log("call(): suspended:", e instanceof ZymSuspended,
+                " resumable:", b.info().resumable);
+}
+```
+
+```
+run():  suspended: true  resumable: true
+call(): suspended: false  resumable: false
+```
+
+Same script, same entry, same loop. The only difference is `run()` versus `call()`.
+
+The reason is that pausing means keeping the whole stack for later, and a host call puts *your JS frame* in the middle of that stack. Suspending would mean unwinding your `vm.call(...)` to hand control back, then rebuilding it on `resume()` — and there is no way to rebuild a JS function that already returned. So the VM does the only other thing it can: it stops the script for good and reports why. That applies to the memory ceiling and `requestStop()` exactly as it does to a preemption entry.
+
+It also applies one level deeper. A native you register is a JS function, and if it calls back into the VM — `vm.call`, a `getFunc` callable, running another chunk — then everything the script does underneath it is inside a host call too:
+
+```js
+vm.registerNative("render()", () => {
+    vm.call("draw");        // anything that fires in here terminates,
+});                         // it cannot suspend back out through render()
+```
+
+Practical shape: **do the bounded work inside `run()`.** Let the script drive its own loop and use `call()` for short, trusted entry points you do not need to interrupt. If you must bound a `call()`, treat the bound as a kill switch rather than a pause — which is usually what you wanted from an entry point that overran anyway.
+
+Two things are *not* affected, and are worth knowing so you do not over-correct:
+
+- **Registering entries from inside a native is fine.** `addPreempt`, `removePreempt`, `setMemoryLimit`, `requestStop` all work normally there. Only the moment a bound *fires* is constrained.
+- **Continuations follow the same rule.** A script that captures a continuation spanning a host call is refused with an error naming the function, rather than quietly producing one that is not properly delimited.
 
 ### Budgeting the entry table
 
