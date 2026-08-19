@@ -318,7 +318,7 @@ const char* zjs_currentImportCaller(ZymVM* vm);
 // Build info
 // -----------------------------------------------------------------------------
 // Keep in sync with package.json "version".
-#define ZJS_VERSION "0.3.0-alpha.3"
+#define ZJS_VERSION "0.3.2"
 const char* zjs_version(void);
 
 #ifdef __cplusplus

@@ -4,9 +4,9 @@ JavaScript / WebAssembly bindings for the [Zym](https://github.com/zym-lang) scr
 
 ---
 
-> **`0.3.0`.** The JS API, native-signature grammar, and value marshaling described here are stable for this release.
+> **`0.3.2`.** The JS API, native-signature grammar, and value marshaling described here are stable for this release.
 >
-> Bytecode is portable across builds of `0.3.0`; the format changed since `0.2.0`, so earlier artifacts do not load.
+> Bytecode is portable across builds of `0.3.2`; the format changed since `0.2.0`, so earlier artifacts do not load.
 
 ---
 
